@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Circular Orbit Acceptance Test</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      body {
+        margin: 0;
+        padding: 2rem clamp(1rem, 4vw, 3rem);
+        background: #0d1117;
+        color: #c9d1d9;
+        line-height: 1.5;
+      }
+      h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+      p.sub { margin: 0 0 1.5rem; color: #8b949e; }
+      .result {
+        border: 1px solid #30363d;
+        border-radius: 8px;
+        padding: 1rem 1.25rem;
+        margin: 0 0 1rem;
+        background: #161b22;
+      }
+      .result h2 { font-size: 0.95rem; margin: 0 0 0.5rem; display: flex; align-items: center; gap: 0.5rem; }
+      .badge { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.04em; padding: 0.15rem 0.5rem; border-radius: 999px; text-transform: uppercase; }
+      .pass { background: #196c2e; color: #d5ffe0; }
+      .fail { background: #8c1c13; color: #ffd9d4; }
+      .pending { background: #30363d; color: #c9d1d9; }
+      .detail { color: #8b949e; font-size: 0.85rem; white-space: pre-wrap; margin: 0.25rem 0 0; }
+      canvas { display: block; margin-top: 0.75rem; border: 1px solid #30363d; border-radius: 6px; background: #05070d; }
+      code { color: #79c0ff; }
+      figcaption { color: #8b949e; font-size: 0.8rem; margin-top: 0.4rem; }
+    </style>
+  </head>
+  <body>
+    <h1>Circular orbit acceptance test</h1>
+    <p class="sub">
+      Verifies Newtonian gravity: a body at <code>v = √(G·M/r)</code> must hold a near-circular orbit
+      (radius within ±25% of r, ~1 revolution) over one full period. Serve over HTTP
+      (<code>python3 -m http.server</code>) so the harness can read <code>index.html</code>'s
+      optional <code>window.gravityStep</code> hook.
+    </p>
+
+    <div class="result" id="impl-result">
+      <h2>Your implementation <span class="badge pending" id="impl-badge">checking…</span></h2>
+      <p class="detail" id="impl-detail">Looking for <code>window.gravityStep</code> in ./index.html …</p>
+    </div>
+
+    <div class="result" id="ref-result">
+      <h2>Reference oracle <span class="badge pending" id="ref-badge">running…</span></h2>
+      <p class="detail" id="ref-detail"></p>
+      <figure style="margin:0">
+        <canvas id="ref-canvas" width="320" height="320"></canvas>
+        <figcaption>Reference orbit traced over one period (should be a clean circle).</figcaption>
+      </figure>
+    </div>
+
+    <iframe id="app" src="./index.html" style="display:none" title="app under test"></iframe>
+
+    <script>
+      // ---- Test scenario -----------------------------------------------------
+      const G = 1, M = 1e6, R = 100;
+      const V = Math.sqrt((G * M) / R);                 // circular-orbit speed
+      const PERIOD = 2 * Math.PI * Math.sqrt((R * R * R) / (G * M));
+      const STEPS = 8000;
+      const DT = PERIOD / STEPS;
+
+      function initialBodies() {
+        return [
+          { x: 0, y: 0, vx: 0, vy: 0, mass: M },        // heavy central mass
+          { x: R, y: 0, vx: 0, vy: V, mass: 1e-3 },     // light test body
+        ];
+      }
+
+      // ---- Pure reference integrator (semi-implicit Euler) -------------------
+      function referenceStep(bodies, dt) {
+        const n = bodies.length, soft = 1e-3;
+        const ax = new Array(n).fill(0), ay = new Array(n).fill(0);
+        for (let i = 0; i < n; i++) {
+          for (let j = 0; j < n; j++) {
+            if (i === j) continue;
+            const dx = bodies[j].x - bodies[i].x;
+            const dy = bodies[j].y - bodies[i].y;
+            const r2 = dx * dx + dy * dy + soft * soft;
+            const r = Math.sqrt(r2);
+            const f = (G * bodies[j].mass) / r2;
+            ax[i] += (f * dx) / r;
+            ay[i] += (f * dy) / r;
+          }
+        }
+        return bodies.map((b, i) => {
+          const vx = b.vx + ax[i] * dt;                 // update velocity, then position
+          const vy = b.vy + ay[i] * dt;
+          return { x: b.x + vx * dt, y: b.y + vy * dt, vx, vy, mass: b.mass };
+        });
+      }
+
+      // Run stepFn for one period from the circular-orbit setup; measure radius
+      // bounds and total angle swept around the (near-fixed) central mass.
+      function runOrbitTest(stepFn, collectPath) {
+        let bodies = initialBodies();
+        let minR = Infinity, maxR = -Infinity, totalAngle = 0;
+        let prevAng = 0;
+        const path = [];
+        for (let s = 0; s < STEPS; s++) {
+          bodies = stepFn(bodies.map((b) => ({ ...b })), DT);
+          if (!Array.isArray(bodies) || bodies.length !== 2) {
+            return { ok: false, reason: `step returned wrong shape at step ${s + 1}` };
+          }
+          const c = bodies[0], p = bodies[1];
+          const dx = p.x - c.x, dy = p.y - c.y;
+          const r = Math.hypot(dx, dy);
+          if (!isFinite(r)) return { ok: false, reason: `non-finite position at step ${s + 1}` };
+          minR = Math.min(minR, r);
+          maxR = Math.max(maxR, r);
+          const ang = Math.atan2(dy, dx);
+          let d = ang - prevAng;
+          while (d > Math.PI) d -= 2 * Math.PI;
+          while (d < -Math.PI) d += 2 * Math.PI;
+          totalAngle += d;
+          prevAng = ang;
+          if (collectPath && s % 20 === 0) path.push([dx, dy]);
+        }
+        const revolutions = Math.abs(totalAngle) / (2 * Math.PI);
+        const radiusOk = minR > R * 0.75 && maxR < R * 1.25;
+        const revOk = revolutions > 0.8 && revolutions < 1.2;
+        return {
+          ok: radiusOk && revOk,
+          minR, maxR, revolutions, path,
+          msg:
+            `radius: ${minR.toFixed(1)} … ${maxR.toFixed(1)} (target ${R}, ±25% band ${(R*0.75).toFixed(0)}–${(R*1.25).toFixed(0)})  ${radiusOk ? "PASS" : "FAIL"}\n` +
+            `revolutions in one period: ${revolutions.toFixed(3)} (target ~1.000)  ${revOk ? "PASS" : "FAIL"}` +
+            (radiusOk && revOk ? "" : "\nOrbit is not circular — check the 1/r² force law, the sign, and the mass term."),
+        };
+      }
+
+      function setBadge(id, pass, label) {
+        const el = document.getElementById(id);
+        el.className = "badge " + (pass ? "pass" : "fail");
+        el.textContent = label || (pass ? "pass" : "fail");
+      }
+
+      // ---- Reference oracle (proves the test is correctly specified) ---------
+      (function runReference() {
+        const res = runOrbitTest(referenceStep, true);
+        setBadge("ref-badge", res.ok);
+        document.getElementById("ref-detail").textContent = res.msg;
+        drawOrbit(res.path);
+      })();
+
+      function drawOrbit(path) {
+        const cv = document.getElementById("ref-canvas");
+        const ctx = cv.getContext("2d");
+        const cx = cv.width / 2, cy = cv.height / 2, scale = (cv.width / 2 - 24) / R;
+        ctx.strokeStyle = "#3fb950";
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        path.forEach(([dx, dy], i) => {
+          const x = cx + dx * scale, y = cy + dy * scale;
+          i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+        });
+        ctx.closePath();
+        ctx.stroke();
+        ctx.fillStyle = "#f0c000";                       // central mass
+        ctx.beginPath();
+        ctx.arc(cx, cy, 5, 0, 2 * Math.PI);
+        ctx.fill();
+      }
+
+      // ---- Test the app's implementation, if it exposes the hook -------------
+      function checkImplementation() {
+        const detail = document.getElementById("impl-detail");
+        let win = null;
+        try { win = document.getElementById("app").contentWindow; } catch (e) { win = null; }
+        const stepFn = win && typeof win.gravityStep === "function" ? win.gravityStep : null;
+
+        if (!stepFn) {
+          setBadge("impl-badge", false, "no hook");
+          document.getElementById("impl-badge").className = "badge pending";
+          detail.innerHTML =
+            "No <code>window.gravityStep</code> found in ./index.html.\n" +
+            "Either it isn't implemented yet, the function isn't exposed, or your browser is\n" +
+            "blocking file:// iframe access — serve over HTTP and reload to test automatically.\n" +
+            "(The reference result above still shows the expected behaviour.)";
+          return;
+        }
+        let res;
+        try { res = runOrbitTest(stepFn, false); }
+        catch (e) { setBadge("impl-badge", false); detail.textContent = "gravityStep threw: " + (e && e.message ? e.message : e); return; }
+        setBadge("impl-badge", res.ok);
+        detail.textContent = res.reason ? res.reason : res.msg;
+      }
+
+      const app = document.getElementById("app");
+      let tries = 0;
+      function pollForHook() {
+        let win = null;
+        try { win = app.contentWindow; } catch (e) { win = null; }
+        if (win && typeof win.gravityStep === "function") checkImplementation();
+        else if (tries++ < 20) setTimeout(pollForHook, 150);
+        else checkImplementation();
+      }
+      app.addEventListener("load", pollForHook);
+    </script>
+  </body>
+</html>
