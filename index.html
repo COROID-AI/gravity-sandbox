@@ -386,7 +386,7 @@
 
       // Build the initial preset. Returns a fresh bodies array each call.
       function createPresetBodies() {
-        const G = PHYS.G;
+        const G = STATE.params.G;   // same gravity strength the integrator uses
         const M = 1e6;                 // heavy central star
         const star = { x: 0, y: 0, vx: 0, vy: 0, mass: M };
 
