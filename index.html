@@ -54,6 +54,20 @@
         background: rgba(40, 48, 64, 0.85);
         border-color: rgba(160, 180, 220, 0.7);
       }
+
+      /* 'Built by Coroid' credit — stays fixed in the corner, unaffected
+         by the canvas camera transform (it lives in the DOM overlay). */
+      #credit {
+        position: fixed;
+        bottom: 10px;
+        right: 14px;
+        z-index: 10;
+        font-size: 0.72rem;
+        letter-spacing: 0.04em;
+        color: rgba(200, 210, 230, 0.55);
+        pointer-events: none;
+        user-select: none;
+      }
     </style>
   </head>
   <body>
@@ -63,7 +77,11 @@
     <!-- Minimal controls; expanded by downstream tasks. -->
     <div id="controls">
       <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
+      <button id="btn-reset-view" type="button" title="Reset pan and zoom">Reset View</button>
     </div>
+
+    <!-- Credit label (DOM overlay, independent of camera transform). -->
+    <div id="credit">Built by Coroid</div>
 
     <script>
       /* ============================================================
@@ -97,7 +115,14 @@
         initialBodies: [],      // frozen snapshot for exact Reset restores
         camera: { x: 0, y: 0, zoom: 1 },
         params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS },
-        input: { mouseX: 0, mouseY: 0, dragging: false },
+        input: {
+          mouseX: 0, mouseY: 0, dragging: false,
+          // Pan / zoom navigation state (this task).
+          panning: false, panStartX: 0, panStartY: 0, camStartX: 0, camStartY: 0,
+          // Pinch-to-zoom tracking for touch devices.
+          pinching: false, pinchStartDist: 0, pinchStartZoom: 1,
+          pinchCenterX: 0, pinchCenterY: 0,
+        },
         flags: { paused: false, showTrails: true, showHelp: true },
       };
 
@@ -263,13 +288,49 @@
          glow / deep-space palette is layered in by a downstream task.
          ============================================================ */
 
-      // World -> screen projection. Centred on the viewport; the camera
-      // (downstream task) will eventually drive pan/zoom.
+      // World -> screen projection. Applies the camera transform:
+      //   1. scale world units by PIXELS_PER_UNIT and the camera zoom
+      //   2. translate by the camera pan offset (in screen pixels)
+      // The viewport centre is the rest origin; camera.x/y shift it.
       function worldToScreen(x, y) {
         const cx = STATE.canvas.width / 2;
         const cy = STATE.canvas.height / 2;
-        const s = CONFIG.PIXELS_PER_UNIT;
-        return [cx + x * s, cy + y * s];
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        return [cx + cam.x + x * s, cy + cam.y + y * s];
+      }
+
+      // Screen -> world projection (inverse of worldToScreen). Used to zoom
+      // around the cursor: convert the cursor to world space, adjust zoom,
+      // then re-anchor so that same world point stays under the cursor.
+      function screenToWorld(sx, sy) {
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        return [(sx - cx - cam.x) / s, (sy - cy - cam.y) / s];
+      }
+
+      // Zoom around a screen point, keeping that world point fixed under
+      // the cursor. `factor` > 1 zooms in, < 1 zooms out.
+      function zoomAtScreen(sx, sy, factor) {
+        const cam = STATE.camera;
+        const before = screenToWorld(sx, sy);
+        cam.zoom = Math.max(0.05, Math.min(50, cam.zoom * factor));
+        const after = screenToWorld(sx, sy);
+        // Compensate pan so the world point under the cursor is unchanged.
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        cam.x += (after[0] - before[0]) * s;
+        cam.y += (after[1] - before[1]) * s;
+      }
+
+      // Reset the camera to the default (centred, 1× zoom).
+      function resetView() {
+        STATE.camera.x = 0;
+        STATE.camera.y = 0;
+        STATE.camera.zoom = 1;
       }
 
       // Mass -> drawn radius (pixels). Cube-root scaling so a 10× mass
@@ -347,12 +408,16 @@
         // Paint the deep-space background every frame.
         paintBackground();
 
+        // The camera transform is applied inside worldToScreen(), so both
+        // bodies and any future trails automatically pan/zoom together.
         const bodies = STATE.bodies;
         for (let i = 0; i < bodies.length; i++) {
           const b = bodies[i];
           const sx = worldToScreen(b.x, b.y);
-          const radius = massToRadius(b.mass);
-          drawBody(ctx, sx[0], sx[1], radius, bodyColor(b, i));
+          // Keep bodies crisp at any zoom: scale the drawn radius by zoom so
+          // zooming in enlarges bodies and zooming out shrinks them.
+          const radius = massToRadius(b.mass) * STATE.camera.zoom;
+          drawBody(ctx, sx[0], sx[1], Math.max(0.5, radius), bodyColor(b, i));
         }
       }
 
@@ -376,16 +441,117 @@
       /* ============================================================
          ENTRY POINT
          ============================================================ */
-      // Wire up the Reset control (full control panel comes later).
+      // Wire up the Reset + Reset View controls (full panel comes later).
       function setupControls() {
         const btn = document.getElementById('btn-reset');
         if (btn) btn.addEventListener('click', resetToPreset);
+        const btnView = document.getElementById('btn-reset-view');
+        if (btnView) btnView.addEventListener('click', resetView);
+      }
+
+      /* ============================================================
+         CAMERA INPUT — pan (middle mouse / Shift+drag) and zoom (wheel,
+         pinch). These are intentionally separate from the launch
+         interaction (plain left-drag) so navigation never hijacks it.
+         ============================================================ */
+      function setupCameraInput() {
+        const canvas = STATE.canvas;
+
+        // --- Mouse wheel: zoom in/out centred on the cursor ---
+        canvas.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          // deltaY > 0 scrolls down -> zoom out. Use a smooth exponential factor.
+          const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+          zoomAtScreen(e.clientX, e.clientY, factor);
+        }, { passive: false });
+
+        // --- Mouse pan: middle button OR Shift + left button ---
+        canvas.addEventListener('mousedown', function (e) {
+          const wantPan = e.button === 1 || (e.button === 0 && e.shiftKey);
+          if (!wantPan) return;
+          e.preventDefault();
+          const inp = STATE.input;
+          inp.panning = true;
+          inp.panStartX = e.clientX;
+          inp.panStartY = e.clientY;
+          inp.camStartX = STATE.camera.x;
+          inp.camStartY = STATE.camera.y;
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          const inp = STATE.input;
+          // Track cursor for downstream launch preview regardless of pan.
+          inp.mouseX = e.clientX;
+          inp.mouseY = e.clientY;
+          if (!inp.panning) return;
+          // Translate the camera by the pixel delta (1:1 screen pan).
+          STATE.camera.x = inp.camStartX + (e.clientX - inp.panStartX);
+          STATE.camera.y = inp.camStartY + (e.clientY - inp.panStartY);
+        });
+
+        window.addEventListener('mouseup', function (e) {
+          if (e.button === 1 || e.button === 0) {
+            STATE.input.panning = false;
+          }
+        });
+
+        // --- Touch: single-finger is reserved for launch (downstream);
+        //     two-finger pinch zooms and pans. ---
+        canvas.addEventListener('touchstart', function (e) {
+          if (e.touches.length === 2) {
+            e.preventDefault();
+            const t0 = e.touches[0], t1 = e.touches[1];
+            const dx = t1.clientX - t0.clientX;
+            const dy = t1.clientY - t0.clientY;
+            const inp = STATE.input;
+            inp.pinching = true;
+            inp.pinchStartDist = Math.hypot(dx, dy);
+            inp.pinchStartZoom = STATE.camera.zoom;
+            inp.pinchCenterX = (t0.clientX + t1.clientX) / 2;
+            inp.pinchCenterY = (t0.clientY + t1.clientY) / 2;
+            inp.camStartX = STATE.camera.x;
+            inp.camStartY = STATE.camera.y;
+            inp.panStartX = inp.pinchCenterX;
+            inp.panStartY = inp.pinchCenterY;
+          }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function (e) {
+          const inp = STATE.input;
+          if (!inp.pinching || e.touches.length !== 2) return;
+          e.preventDefault();
+          const t0 = e.touches[0], t1 = e.touches[1];
+          const dx = t1.clientX - t0.clientX;
+          const dy = t1.clientY - t0.clientY;
+          const dist = Math.hypot(dx, dy);
+          const midX = (t0.clientX + t1.clientX) / 2;
+          const midY = (t0.clientY + t1.clientY) / 2;
+          // Zoom around the original pinch centre using the distance ratio.
+          if (inp.pinchStartDist > 0) {
+            const ratio = dist / inp.pinchStartDist;
+            // Re-derive zoom from the start to keep it stable across events.
+            STATE.camera.zoom = Math.max(0.05, Math.min(50, inp.pinchStartZoom * ratio));
+          }
+          // Pan by the midpoint delta so two-finger drag moves the view.
+          STATE.camera.x = inp.camStartX + (midX - inp.panStartX);
+          STATE.camera.y = inp.camStartY + (midY - inp.panStartY);
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function (e) {
+          if (e.touches.length < 2) {
+            STATE.input.pinching = false;
+          }
+        });
+        canvas.addEventListener('touchcancel', function () {
+          STATE.input.pinching = false;
+        });
       }
 
       function init() {
         setupCanvas();
         loadPreset();          // initialise bodies before the first frame
         setupControls();
+        setupCameraInput();   // pan / zoom navigation (this task)
         requestAnimationFrame(loop);
       }
 
