@@ -79,20 +79,61 @@
       }
 
       /* ============================================================
-         PHYSICS STUB — pure function, returns a NEW bodies array.
-         Downstream task "Newtonian N-body integrator" will replace the body.
+         PHYSICS — Newtonian N-body integrator (pure function).
+         Pairwise gravity:  F = G·m₁·m₂ / (r² + ε²)
+         Integrator:        semi-implicit (symplectic) Euler
+                             vₙ₊₁ = vₙ + a·dt
+                             xₙ₊₁ = xₙ + vₙ₊₁·dt
+         Returns a NEW bodies array; the input is never mutated.
          Signature contract: gravityStep(bodies, dt) -> bodies[]
          ============================================================ */
+      const PHYS = Object.freeze({
+        G: 1.0,            // gravitational constant
+        SOFTENING: 0.05,   // ε — softening length (< 1) to avoid singularities
+      });
+
       function gravityStep(bodies, dt) {
-        // Defensive: return a new array of shallow-cloned bodies so callers
-        // never mutate the source. Real integration is layered in later.
-        if (!Array.isArray(bodies)) return [];
-        return bodies.map(function (b) {
+        // Defensive: non-array or empty input yields a fresh empty array.
+        if (!Array.isArray(bodies) || bodies.length === 0) return [];
+
+        const n = bodies.length;
+        const G = PHYS.G;
+        const eps2 = PHYS.SOFTENING * PHYS.SOFTENING; // softening squared
+
+        // Accumulate accelerations without touching the source array.
+        const ax = new Array(n).fill(0);
+        const ay = new Array(n).fill(0);
+
+        for (let i = 0; i < n; i++) {
+          const bi = bodies[i];
+          for (let j = i + 1; j < n; j++) {
+            const bj = bodies[j];
+            const dx = bj.x - bi.x;
+            const dy = bj.y - bi.y;
+            // r² + ε²  — softening prevents division-by-zero / slingshots.
+            const r2 = dx * dx + dy * dy + eps2;
+            const invR = 1 / Math.sqrt(r2);
+            const invR3 = invR * invR * invR; // 1 / (r²+ε²)^(3/2)
+            // a_i += G·m_j·(r_j - r_i) / |r|³   (Newton's law of gravitation)
+            const gi = G * bj.mass * invR3;
+            ax[i] += gi * dx;
+            ay[i] += gi * dy;
+            // Equal & opposite reaction (Newton's third law).
+            const gj = G * bi.mass * invR3;
+            ax[j] -= gj * dx;
+            ay[j] -= gj * dy;
+          }
+        }
+
+        // Semi-implicit Euler: advance velocity, then position (symplectic).
+        return bodies.map(function (b, i) {
+          const vx = b.vx + ax[i] * dt;
+          const vy = b.vy + ay[i] * dt;
           return {
-            x: b.x,
-            y: b.y,
-            vx: b.vx,
-            vy: b.vy,
+            x: b.x + vx * dt,
+            y: b.y + vy * dt,
+            vx: vx,
+            vy: vy,
             mass: b.mass,
           };
         });
