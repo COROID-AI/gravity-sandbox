@@ -91,6 +91,11 @@
         // Cube-root keeps surface gravity sensible and sizes readable.
         MASS_RADIUS_K: 0.8,
         MASS_RADIUS_MIN: 2.5,   // minimum drawn radius in pixels
+        // Launch interaction: drag vector -> initial velocity.
+        // The drag length (screen px) is scaled into world velocity units.
+        LAUNCH_VEL_SCALE: 0.08,
+        LAUNCH_MASS: 100,       // mass of a user-launched body
+        LAUNCH_COLOR: '#ffffff', // color of a user-launched body
       });
 
       /* ============================================================
@@ -111,6 +116,13 @@
           // Pinch-to-zoom tracking for touch devices.
           pinching: false, pinchStartDist: 0, pinchStartZoom: 1,
           pinchCenterX: 0, pinchCenterY: 0,
+          // Click-and-drag launch state. `launching` is true while a launch
+          // drag is in progress. launchWorld is the fixed world-space origin
+          // of the new body; launchCurX/Y track the current pointer in screen
+          // pixels so the aim line follows the cursor and the camera.
+          launching: false,
+          launchWorldX: 0, launchWorldY: 0,
+          launchCurX: 0, launchCurY: 0,
         },
         flags: { paused: false, showTrails: true, showHelp: true },
       };
@@ -391,6 +403,52 @@
         ctx.fill();
       }
 
+      // Draw the launch aim line: from the launch origin (world space,
+      // projected through the current camera) to the current pointer
+      // position (screen space). Because the origin is re-projected every
+      // frame, the line stays anchored in the world as the camera pans/zooms.
+      function drawLaunchAim(ctx) {
+        const inp = STATE.input;
+        if (!inp.launching) return;
+        const start = worldToScreen(inp.launchWorldX, inp.launchWorldY);
+        const ex = inp.launchCurX;
+        const ey = inp.launchCurY;
+
+        // Dashed aim line.
+        ctx.save();
+        ctx.setLineDash([6, 5]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.beginPath();
+        ctx.moveTo(start[0], start[1]);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        ctx.restore();
+
+        // Marker at the launch origin.
+        ctx.beginPath();
+        ctx.arc(start[0], start[1], 4, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fill();
+
+        // Arrowhead at the pointer indicating launch direction.
+        const dx = ex - start[0];
+        const dy = ey - start[1];
+        const len = Math.hypot(dx, dy);
+        if (len > 1) {
+          const ang = Math.atan2(dy, dx);
+          const ah = 10;
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - ah * Math.cos(ang - 0.4), ey - ah * Math.sin(ang - 0.4));
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - ah * Math.cos(ang + 0.4), ey - ah * Math.sin(ang + 0.4));
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
       function render() {
         const ctx = STATE.ctx;
         if (!ctx) return;
@@ -408,6 +466,9 @@
           const radius = massToRadius(b.mass) * STATE.camera.zoom;
           drawBody(ctx, sx[0], sx[1], Math.max(0.5, radius), bodyColor(b, i));
         }
+
+        // Draw the launch aim line on top of everything else.
+        drawLaunchAim(ctx);
       }
 
       /* ============================================================
@@ -536,11 +597,110 @@
         });
       }
 
+      /* ============================================================
+         LAUNCH INPUT — click-and-drag to fling a new body.
+         Plain left-drag (mouse) or single-finger drag (touch) starts a
+         launch. The drag vector defines the initial velocity: the body is
+         spawned at the press position in world space and released with
+         velocity proportional to the drag (screen px -> world units).
+         ============================================================ */
+      function setupLaunchInput() {
+        const canvas = STATE.canvas;
+
+        // --- Mouse: left button without Shift starts a launch ---
+        canvas.addEventListener('mousedown', function (e) {
+          if (e.button !== 0 || e.shiftKey) return; // pan owns these
+          e.preventDefault();
+          startLaunch(e.clientX, e.clientY);
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          const inp = STATE.input;
+          if (!inp.launching) return;
+          inp.launchCurX = e.clientX;
+          inp.launchCurY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', function (e) {
+          if (e.button !== 0) return;
+          if (STATE.input.launching) finishLaunch();
+        });
+
+        // --- Touch: single finger starts a launch; two fingers are pinch ---
+        canvas.addEventListener('touchstart', function (e) {
+          if (e.touches.length !== 1) return;       // pinch handled elsewhere
+          if (STATE.input.pinching) return;
+          e.preventDefault();
+          const t = e.touches[0];
+          startLaunch(t.clientX, t.clientY);
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function (e) {
+          const inp = STATE.input;
+          if (!inp.launching || e.touches.length !== 1) return;
+          e.preventDefault();
+          const t = e.touches[0];
+          inp.launchCurX = t.clientX;
+          inp.launchCurY = t.clientY;
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function (e) {
+          if (STATE.input.launching && e.touches.length === 0) {
+            finishLaunch();
+          }
+        });
+        canvas.addEventListener('touchcancel', function () {
+          if (STATE.input.launching) cancelLaunch();
+        });
+      }
+
+      // Begin a launch: record the world-space origin and current pointer.
+      function startLaunch(screenX, screenY) {
+        const w = screenToWorld(screenX, screenY);
+        const inp = STATE.input;
+        inp.launching = true;
+        inp.launchWorldX = w[0];
+        inp.launchWorldY = w[1];
+        inp.launchCurX = screenX;
+        inp.launchCurY = screenY;
+      }
+
+      // Finalise a launch: spawn a body whose velocity is proportional to
+      // the drag vector (pointer - origin), converted to world units.
+      function finishLaunch() {
+        const inp = STATE.input;
+        inp.launching = false;
+        const start = worldToScreen(inp.launchWorldX, inp.launchWorldY);
+        // Drag vector in screen pixels.
+        const dx = inp.launchCurX - start[0];
+        const dy = inp.launchCurY - start[1];
+        // Convert screen px to world velocity via the render scale + zoom,
+        // then apply the tunable velocity multiplier.
+        const s = CONFIG.PIXELS_PER_UNIT * STATE.camera.zoom;
+        const k = CONFIG.LAUNCH_VEL_SCALE / s;
+        if (STATE.bodies.length < CONFIG.MAX_BODIES) {
+          STATE.bodies.push({
+            x: inp.launchWorldX,
+            y: inp.launchWorldY,
+            vx: dx * k,
+            vy: dy * k,
+            mass: CONFIG.LAUNCH_MASS,
+            color: CONFIG.LAUNCH_COLOR,
+          });
+        }
+      }
+
+      // Abort an in-progress launch without spawning a body.
+      function cancelLaunch() {
+        STATE.input.launching = false;
+      }
+
       function init() {
         setupCanvas();
         loadPreset();          // initialise bodies before the first frame
         setupControls();
         setupCameraInput();   // pan / zoom navigation (this task)
+        setupLaunchInput();   // click-and-drag launch (this task)
         requestAnimationFrame(loop);
       }
 
