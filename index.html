@@ -54,6 +54,32 @@
         background: rgba(40, 48, 64, 0.85);
         border-color: rgba(160, 180, 220, 0.7);
       }
+
+      /* Inline control group (e.g. trail-length slider). */
+      #controls .ctl-group {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: #eee;
+        background: rgba(20, 24, 34, 0.75);
+        border: 1px solid rgba(120, 140, 180, 0.4);
+        border-radius: 6px;
+        padding: 6px 10px;
+        backdrop-filter: blur(4px);
+        font-size: 0.85rem;
+      }
+      #controls .ctl-group label { white-space: nowrap; opacity: 0.85; }
+      #controls .ctl-group input[type="range"] {
+        width: 110px;
+        cursor: pointer;
+        accent-color: #66ccff;
+      }
+      #controls .ctl-group .val {
+        min-width: 2.2em;
+        text-align: right;
+        font-variant-numeric: tabular-nums;
+        opacity: 0.9;
+      }
     </style>
   </head>
   <body>
@@ -63,6 +89,11 @@
     <!-- Minimal controls; expanded by downstream tasks. -->
     <div id="controls">
       <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
+      <div class="ctl-group" title="Trail length (number of stored positions per body)">
+        <label for="trail-length">Trails</label>
+        <input id="trail-length" type="range" min="0" max="400" step="1" value="60" />
+        <span class="val" id="trail-length-val">60</span>
+      </div>
     </div>
 
     <script>
@@ -72,7 +103,9 @@
       const CONFIG = Object.freeze({
         G: 1.0,                 // gravitational constant (tunable)
         SOFTENING: 5.0,         // softening factor to avoid singularities
-        TRAIL_ALPHA: 0.12,      // motion-trail fade alpha
+        TRAIL_ALPHA: 0.12,      // motion-trail fade alpha (legacy, unused by stroke trails)
+        TRAIL_LENGTH: 60,       // default number of stored positions per body trail
+        TRAIL_MAX_LENGTH: 400,  // hard cap for the trail-length control
         MAX_BODIES: 500,        // hard cap for safety
         DT: 0.05,               // default integration timestep (stable for orbits)
         SUBSTEPS: 4,            // physics substeps per frame
@@ -96,7 +129,7 @@
         bodies: [],
         initialBodies: [],      // frozen snapshot for exact Reset restores
         camera: { x: 0, y: 0, zoom: 1 },
-        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS },
+        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS, trailLength: CONFIG.TRAIL_LENGTH },
         input: { mouseX: 0, mouseY: 0, dragging: false },
         flags: { paused: false, showTrails: true, showHelp: true },
       };
@@ -249,11 +282,15 @@
         const fresh = createPresetBodies();
         STATE.initialBodies = cloneBodies(fresh); // frozen restore point
         STATE.bodies = cloneBodies(fresh);
+        // Initialise an empty trail buffer for each body so trails start clean.
+        STATE.trails = STATE.bodies.map(function () { return []; });
       }
 
       // Restore the exact initial preset state.
       function resetToPreset() {
         STATE.bodies = cloneBodies(STATE.initialBodies);
+        // Clear all trails so Reset does not show stale paths.
+        STATE.trails = STATE.bodies.map(function () { return []; });
       }
 
       /* ============================================================
@@ -313,6 +350,70 @@
         return b.color || (i === 0 ? '#ffe08a' : '#cccccc');
       }
 
+      /* ------------------------------------------------------------
+         TRAILS — per-body fading motion paths.
+         Each body owns a ring buffer of recent world-space positions.
+         Trails are rendered as anti-aliased polylines whose alpha fades
+         from the head (newest, brightest) to the tail (oldest, ~0).
+         They are drawn AFTER the background but BEFORE the bodies so they
+         never obscure the bodies themselves.
+         ------------------------------------------------------------ */
+
+      // Record the current position of every body into its trail buffer,
+      // trimming to the configured trail length. Called once per frame
+      // (after physics) so the trail resolution is frame-rate dependent
+      // but visually smooth at typical refresh rates.
+      function recordTrails() {
+        const bodies = STATE.bodies;
+        const trails = STATE.trails;
+        const maxLen = STATE.params.trailLength;
+        for (let i = 0; i < bodies.length; i++) {
+          const b = bodies[i];
+          const tr = trails[i] || (trails[i] = []);
+          tr.push(b.x, b.y); // store as flat [x,y,x,y,...] to avoid GC churn
+          // Trim oldest pairs beyond the configured length.
+          if (tr.length > maxLen * 2) tr.splice(0, tr.length - maxLen * 2);
+        }
+      }
+
+      // Draw all trails for the current frame. Each trail segment fades
+      // linearly from head-alpha down to zero at the tail, producing a
+      // smooth, anti-aliased fade that never fully covers the canvas.
+      function drawTrails(ctx) {
+        if (!STATE.flags.showTrails) return;
+        const trails = STATE.trails;
+        const bodies = STATE.bodies;
+        const maxLen = STATE.params.trailLength;
+        // Head alpha is modest so overlapping trails stay readable and
+        // never wash out the background or bodies.
+        const headAlpha = 0.55;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+
+        for (let i = 0; i < bodies.length; i++) {
+          const tr = trails[i];
+          if (!tr || tr.length < 4) continue; // need at least 2 points
+          const color = bodyColor(bodies[i], i);
+          const pairs = tr.length / 2;
+          // Draw each segment with its own alpha for a smooth fade.
+          for (let s = 1; s < pairs; s++) {
+            // t: 1 at the head (newest), 0 at the tail (oldest).
+            const t = s / (pairs - 1);
+            const alpha = headAlpha * t * t; // quadratic fade for softer tails
+            const x0 = tr[(s - 1) * 2], y0 = tr[(s - 1) * 2 + 1];
+            const x1 = tr[s * 2],     y1 = tr[s * 2 + 1];
+            const p0 = worldToScreen(x0, y0);
+            const p1 = worldToScreen(x1, y1);
+            ctx.beginPath();
+            ctx.strokeStyle = hexToRgba(color, alpha);
+            ctx.lineWidth = Math.max(1, massToRadius(bodies[i].mass) * 0.35);
+            ctx.moveTo(p0[0], p0[1]);
+            ctx.lineTo(p1[0], p1[1]);
+            ctx.stroke();
+          }
+        }
+      }
+
       // Draw a single body as an anti-aliased circle with a radial
       // gradient core and a soft outer glow halo.
       function drawBody(ctx, sx, sy, radius, color) {
@@ -346,6 +447,8 @@
         if (!ctx) return;
         // Paint the deep-space background every frame.
         paintBackground();
+        // Draw fading trails BEHIND bodies so they never obscure them.
+        drawTrails(ctx);
 
         const bodies = STATE.bodies;
         for (let i = 0; i < bodies.length; i++) {
@@ -368,6 +471,8 @@
           for (let s = 0; s < substeps; s++) {
             STATE.bodies = gravityStep(STATE.bodies, dt);
           }
+          // Sample one trail point per frame (after physics) for smooth paths.
+          recordTrails();
         }
         render();
         requestAnimationFrame(loop);
@@ -376,10 +481,26 @@
       /* ============================================================
          ENTRY POINT
          ============================================================ */
-      // Wire up the Reset control (full control panel comes later).
+      // Wire up the Reset control and trail-length slider.
+      // (Full control panel comes later.)
       function setupControls() {
         const btn = document.getElementById('btn-reset');
         if (btn) btn.addEventListener('click', resetToPreset);
+
+        const slider = document.getElementById('trail-length');
+        const valLabel = document.getElementById('trail-length-val');
+        if (slider) {
+          // Sync the slider to the current configured default.
+          slider.value = String(STATE.params.trailLength);
+          if (valLabel) valLabel.textContent = String(STATE.params.trailLength);
+          slider.addEventListener('input', function () {
+            const v = Math.max(0, Math.min(CONFIG.TRAIL_MAX_LENGTH, parseInt(slider.value, 10) || 0));
+            STATE.params.trailLength = v;
+            if (valLabel) valLabel.textContent = String(v);
+            // A length of 0 effectively disables trails.
+            STATE.flags.showTrails = v > 0;
+          });
+        }
       }
 
       function init() {
