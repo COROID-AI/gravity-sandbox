@@ -124,6 +124,41 @@
         font-weight: 600;
       }
 
+      /* Inline usage hint shown on first load. */
+      #hint {
+        position: fixed;
+        bottom: 10px;
+        left: 14px;
+        z-index: 10;
+        max-width: 320px;
+        font-size: 0.72rem;
+        line-height: 1.5;
+        letter-spacing: 0.02em;
+        color: rgba(200, 210, 230, 0.7);
+        background: rgba(14, 18, 28, 0.7);
+        border: 1px solid rgba(120, 140, 180, 0.22);
+        border-radius: 8px;
+        padding: 8px 12px;
+        backdrop-filter: blur(6px);
+        user-select: none;
+        transition: opacity 0.4s ease;
+      }
+      #hint kbd {
+        display: inline-block;
+        font-family: inherit;
+        font-size: 0.68rem;
+        color: #8fcfff;
+        background: rgba(28, 34, 48, 0.85);
+        border: 1px solid rgba(120, 140, 180, 0.4);
+        border-radius: 4px;
+        padding: 1px 5px;
+        margin: 0 1px;
+      }
+      #hint.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
     </style>
   </head>
   <body>
@@ -165,6 +200,16 @@
       </div>
 
       <div class="readout">Bodies: <span class="val" id="readout-count">0</span></div>
+    </div>
+
+    <!-- Concise inline usage hint, visible on first load. -->
+    <div id="hint">
+      <strong>How to use:</strong>
+      <kbd>Space</kbd> play/pause &middot;
+      <kbd>R</kbd> reset &middot;
+      drag to launch a body &middot;
+      scroll to zoom &middot;
+      Shift+drag to pan
     </div>
 
     <!-- Credit label (DOM overlay, independent of camera transform).
@@ -886,12 +931,47 @@
         STATE.input.launching = false;
       }
 
+      /* ============================================================
+         KEYBOARD SHORTCUTS — Space toggles play/pause, R resets.
+         Ignored while focus is in a text input / slider so typing and
+         slider arrow-key nudging are never hijacked.
+         ============================================================ */
+      function setupKeyboard() {
+        window.addEventListener('keydown', function (e) {
+          // Don't interfere with form fields or range sliders.
+          const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) {
+            return;
+          }
+
+          if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+            e.preventDefault();   // stop page scroll on Space
+            togglePlayPause();
+          } else if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            resetToPreset();
+          }
+        });
+
+        // Auto-dismiss the usage hint after the first real interaction.
+        const hint = document.getElementById('hint');
+        function dismissHint() {
+          if (hint) hint.classList.add('hidden');
+        }
+        // Keep it visible briefly, then fade after 8s or on first key press.
+        window.setTimeout(dismissHint, 8000);
+        window.addEventListener('keydown', function () {
+          dismissHint();
+        }, { once: true });
+      }
+
       function init() {
         setupCanvas();
         loadPreset();          // initialise bodies before the first frame
         setupControls();
         setupCameraInput();   // pan / zoom navigation (this task)
         setupLaunchInput();   // click-and-drag launch (this task)
+        setupKeyboard();      // Space / R shortcuts + hint (this task)
         requestAnimationFrame(loop);
       }
 
