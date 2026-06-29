@@ -4,17 +4,135 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Gravity Sandbox</title>
+    <style>
+      /* ============================================================
+         BASE STYLES — minimal, no external fonts or assets
+         ============================================================ */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;          /* no scrollbars */
+        background: #000;          /* deep-space black */
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #eee;
+      }
+
+      #stage {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: crosshair;
+      }
+    </style>
   </head>
   <body>
-    <!--
-      Implement the 2D N-body gravity sandbox here, following README.md.
+    <!-- Full-viewport canvas; all rendering happens here -->
+    <canvas id="stage"></canvas>
 
-      Everything (HTML, CSS, JS) must live in this single file:
-        - no external requests, no libraries, no build step
-        - must run from file:// offline
+    <script>
+      /* ============================================================
+         CONFIG — tunable constants reserved for downstream tasks
+         ============================================================ */
+      const CONFIG = Object.freeze({
+        G: 1.0,                 // gravitational constant (tunable)
+        SOFTENING: 5.0,         // softening factor to avoid singularities
+        TRAIL_ALPHA: 0.12,      // motion-trail fade alpha
+        MAX_BODIES: 500,        // hard cap for safety
+        DT: 0.5,                // default integration timestep
+        SUBSTEPS: 2,            // physics substeps per frame
+      });
 
-      Optional: expose `window.gravityStep(bodies, dt)` so orbit-test.html
-      can verify your physics automatically (see README.md).
-    -->
+      /* ============================================================
+         STATE — global, extensible object for downstream modules
+         Reserved sections: camera, params, input, flags, bodies
+         ============================================================ */
+      const STATE = {
+        canvas: null,
+        ctx: null,
+        bodies: [],
+        camera: { x: 0, y: 0, zoom: 1 },
+        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS },
+        input: { mouseX: 0, mouseY: 0, dragging: false },
+        flags: { paused: false, showTrails: true, showHelp: true },
+      };
+
+      // Expose globally so downstream modules / console can inspect it.
+      window.STATE = STATE;
+      window.CONFIG = CONFIG;
+
+      /* ============================================================
+         CANVAS — sizing & resize handling
+         ============================================================ */
+      function setupCanvas() {
+        STATE.canvas = document.getElementById('stage');
+        STATE.ctx = STATE.canvas.getContext('2d');
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+      }
+
+      function resizeCanvas() {
+        // Match the viewport exactly; downstream tasks may add devicePixelRatio.
+        STATE.canvas.width = window.innerWidth;
+        STATE.canvas.height = window.innerHeight;
+      }
+
+      /* ============================================================
+         PHYSICS STUB — pure function, returns a NEW bodies array.
+         Downstream task "Newtonian N-body integrator" will replace the body.
+         Signature contract: gravityStep(bodies, dt) -> bodies[]
+         ============================================================ */
+      function gravityStep(bodies, dt) {
+        // Defensive: return a new array of shallow-cloned bodies so callers
+        // never mutate the source. Real integration is layered in later.
+        if (!Array.isArray(bodies)) return [];
+        return bodies.map(function (b) {
+          return {
+            x: b.x,
+            y: b.y,
+            vx: b.vx,
+            vy: b.vy,
+            mass: b.mass,
+          };
+        });
+      }
+
+      // Expose as global test hook (acceptance criterion + orbit-test.html).
+      window.gravityStep = gravityStep;
+
+      /* ============================================================
+         RENDER — clears the canvas each frame.
+         Full rendering is layered in by downstream tasks.
+         ============================================================ */
+      function render() {
+        const ctx = STATE.ctx;
+        if (!ctx) return;
+        // Clear the full viewport every frame.
+        ctx.clearRect(0, 0, STATE.canvas.width, STATE.canvas.height);
+      }
+
+      /* ============================================================
+         LOOP — requestAnimationFrame driver
+         ============================================================ */
+      function loop() {
+        if (!STATE.flags.paused) {
+          // Physics step reserved for downstream integrator task.
+        }
+        render();
+        requestAnimationFrame(loop);
+      }
+
+      /* ============================================================
+         ENTRY POINT
+         ============================================================ */
+      function init() {
+        setupCanvas();
+        requestAnimationFrame(loop);
+      }
+
+      // Start once DOM is ready (script is at end of body, so it is).
+      init();
+    </script>
   </body>
 </html>
