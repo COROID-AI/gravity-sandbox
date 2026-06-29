@@ -5,9 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Gravity Sandbox</title>
     <style>
-      /* ============================================================
+      /* ------------------------------------------------------------
          BASE STYLES — minimal, no external fonts or assets
-         ============================================================ */
+         (Banner uses '-' not '=' to avoid false conflict-marker flags)
+         ------------------------------------------------------------ */
       * { margin: 0; padding: 0; box-sizing: border-box; }
 
       html, body {
@@ -26,10 +27,10 @@
         cursor: crosshair;
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          CONTROLS — overlay panel with play/pause, reset, sliders,
          and a live body-count readout.
-         ============================================================ */
+         ------------------------------------------------------------ */
       #controls {
         position: fixed;
         top: 12px;
@@ -218,9 +219,9 @@
     <div id="credit" style="position:fixed;bottom:10px;right:14px;z-index:10;font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:0.72rem;letter-spacing:0.04em;color:rgba(200, 210, 230, 0.55);pointer-events:none;user-select:none;">Built by Coroid</div>
 
     <script>
-      /* ============================================================
+      /* ------------------------------------------------------------
          CONFIG — tunable constants reserved for downstream tasks
-         ============================================================ */
+         ------------------------------------------------------------ */
       const CONFIG = Object.freeze({
         G: 1.0,                 // gravitational constant (tunable)
         SOFTENING: 5.0,         // softening factor to avoid singularities
@@ -243,10 +244,10 @@
         LAUNCH_COLOR: '#ffffff', // color of a user-launched body
       });
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          STATE — global, extensible object for downstream modules
          Reserved sections: camera, params, input, flags, bodies
-         ============================================================ */
+         ------------------------------------------------------------ */
       const STATE = {
         canvas: null,
         ctx: null,
@@ -277,9 +278,9 @@
       window.STATE = STATE;
       window.CONFIG = CONFIG;
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          CANVAS — sizing & resize handling
-         ============================================================ */
+         ------------------------------------------------------------ */
       function setupCanvas() {
         STATE.canvas = document.getElementById('stage');
         STATE.ctx = STATE.canvas.getContext('2d');
@@ -293,7 +294,7 @@
         STATE.canvas.height = window.innerHeight;
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          PHYSICS — Newtonian N-body integrator (pure function).
          Pairwise gravity:  F = G·m₁·m₂ / (r² + ε²)
          Integrator:        semi-implicit (symplectic) Euler
@@ -301,7 +302,7 @@
                              xₙ₊₁ = xₙ + vₙ₊₁·dt
          Returns a NEW bodies array; the input is never mutated.
          Signature contract: gravityStep(bodies, dt) -> bodies[]
-         ============================================================ */
+         ------------------------------------------------------------ */
       const PHYS = Object.freeze({
         SOFTENING: 0.05,   // ε — softening length (< 1) to avoid singularities
       });
@@ -357,13 +358,13 @@
       // Expose as global test hook (acceptance criterion + orbit-test.html).
       window.gravityStep = gravityStep;
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          PRESET — stable starting system.
          A massive central star with several planets on near-circular
          orbits. Velocities use the circular-orbit speed v = √(G·M/r)
          (computed from the SAME PHYS constants the integrator uses),
          so the system stays bound without collapsing or escaping.
-         ============================================================ */
+         ------------------------------------------------------------ */
 
       // Circular orbital speed for a body of negligible mass around a
       // central mass M at distance r, using the integrator's own G.
@@ -429,12 +430,12 @@
         STATE.trails = STATE.bodies.map(function () { return []; });
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          RENDER — draws bodies each frame.
          Body radius scales with mass (cube-root), satisfying the
          "mass affects rendered body size" requirement. The richer
          glow / deep-space palette is layered in by a downstream task.
-         ============================================================ */
+         ------------------------------------------------------------ */
 
       // World -> screen projection. Applies the camera transform:
       //   1. scale world units by PIXELS_PER_UNIT and the camera zoom
@@ -641,9 +642,9 @@
         drawLaunchAim(ctx);
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          LOOP — requestAnimationFrame driver
-         ============================================================ */
+         ------------------------------------------------------------ */
       function loop() {
         if (!STATE.flags.paused) {
           // Advance physics using the existing integrator. Substeps keep
@@ -669,9 +670,9 @@
         requestAnimationFrame(loop);
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          ENTRY POINT
-         ============================================================ */
+         ------------------------------------------------------------ */
       // Update the play/pause button label to match current state.
       function syncPlayLabel() {
         const btn = document.getElementById('btn-play');
@@ -735,11 +736,11 @@
         updateReadouts();
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          CAMERA INPUT — pan (middle mouse / Shift+drag) and zoom (wheel,
          pinch). These are intentionally separate from the launch
          interaction (plain left-drag) so navigation never hijacks it.
-         ============================================================ */
+         ------------------------------------------------------------ */
       function setupCameraInput() {
         const canvas = STATE.canvas;
 
@@ -833,13 +834,13 @@
         });
       }
 
-      /* ============================================================
+      /* ------------------------------------------------------------
          LAUNCH INPUT — click-and-drag to fling a new body.
          Plain left-drag (mouse) or single-finger drag (touch) starts a
          launch. The drag vector defines the initial velocity: the body is
          spawned at the press position in world space and released with
          velocity proportional to the drag (screen px -> world units).
-         ============================================================ */
+         ------------------------------------------------------------ */
       function setupLaunchInput() {
         const canvas = STATE.canvas;
 
