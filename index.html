@@ -27,8 +27,8 @@
       }
 
       /* ============================================================
-         CONTROLS — minimal overlay (Reset button).
-         Full control panel is layered in by a downstream task.
+         CONTROLS — overlay panel with play/pause, reset, sliders,
+         and a live body-count readout.
          ============================================================ */
       #controls {
         position: fixed;
@@ -36,23 +36,92 @@
         left: 12px;
         z-index: 10;
         display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: rgba(14, 18, 28, 0.82);
+        border: 1px solid rgba(120, 140, 180, 0.28);
+        border-radius: 10px;
+        padding: 12px 14px;
+        backdrop-filter: blur(8px);
+        min-width: 230px;
+        user-select: none;
+      }
+      #controls .btn-row {
+        display: flex;
         gap: 8px;
       }
       #controls button {
+        flex: 1;
         font-family: inherit;
         font-size: 0.85rem;
         color: #eee;
-        background: rgba(20, 24, 34, 0.75);
+        background: rgba(28, 34, 48, 0.85);
         border: 1px solid rgba(120, 140, 180, 0.4);
         border-radius: 6px;
-        padding: 6px 14px;
+        padding: 7px 10px;
         cursor: pointer;
-        backdrop-filter: blur(4px);
         transition: background 0.15s ease, border-color 0.15s ease;
       }
       #controls button:hover {
-        background: rgba(40, 48, 64, 0.85);
+        background: rgba(48, 56, 76, 0.9);
         border-color: rgba(160, 180, 220, 0.7);
+      }
+      #controls button:active {
+        background: rgba(60, 70, 92, 0.95);
+      }
+      #controls .slider-group {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      #controls .slider-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.72rem;
+        color: rgba(200, 210, 230, 0.8);
+        letter-spacing: 0.02em;
+      }
+      #controls .slider-label .val {
+        color: #8fcfff;
+        font-variant-numeric: tabular-nums;
+      }
+      #controls input[type='range'] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 4px;
+        background: rgba(120, 140, 180, 0.3);
+        border-radius: 3px;
+        outline: none;
+        cursor: pointer;
+      }
+      #controls input[type='range']::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #6cb6ff;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+      }
+      #controls input[type='range']::-moz-range-thumb {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #6cb6ff;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+      }
+      #controls .readout {
+        font-size: 0.72rem;
+        color: rgba(200, 210, 230, 0.7);
+        letter-spacing: 0.02em;
+      }
+      #controls .readout .val {
+        color: #8fffaf;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
       }
 
     </style>
@@ -61,10 +130,41 @@
     <!-- Full-viewport canvas; all rendering happens here -->
     <canvas id="stage"></canvas>
 
-    <!-- Minimal controls; expanded by downstream tasks. -->
+    <!-- Control panel: play/pause, reset, parameter sliders, body count. -->
     <div id="controls">
-      <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
-      <button id="btn-reset-view" type="button" title="Reset pan and zoom">Reset View</button>
+      <div class="btn-row">
+        <button id="btn-play" type="button" title="Play / Pause animation">Pause</button>
+        <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-reset-view" type="button" title="Reset pan and zoom">Reset View</button>
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Gravity Strength</span>
+          <span class="val" id="val-gravity">1.00</span>
+        </div>
+        <input id="slider-gravity" type="range" min="0" max="3" step="0.05" value="1" />
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Simulation Speed</span>
+          <span class="val" id="val-dt">0.050</span>
+        </div>
+        <input id="slider-dt" type="range" min="0" max="0.2" step="0.005" value="0.05" />
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Trail Length</span>
+          <span class="val" id="val-trail">60</span>
+        </div>
+        <input id="slider-trail" type="range" min="0" max="300" step="5" value="60" />
+      </div>
+
+      <div class="readout">Bodies: <span class="val" id="readout-count">0</span></div>
     </div>
 
     <!-- Credit label (DOM overlay, independent of camera transform).
@@ -108,7 +208,8 @@
         bodies: [],
         initialBodies: [],      // frozen snapshot for exact Reset restores
         camera: { x: 0, y: 0, zoom: 1 },
-        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS },
+        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS, trailLength: 60 },
+        trails: [],               // per-body position history for motion trails
         input: {
           mouseX: 0, mouseY: 0, dragging: false,
           // Pan / zoom navigation state (this task).
@@ -157,7 +258,6 @@
          Signature contract: gravityStep(bodies, dt) -> bodies[]
          ============================================================ */
       const PHYS = Object.freeze({
-        G: 1.0,            // gravitational constant
         SOFTENING: 0.05,   // ε — softening length (< 1) to avoid singularities
       });
 
@@ -166,7 +266,7 @@
         if (!Array.isArray(bodies) || bodies.length === 0) return [];
 
         const n = bodies.length;
-        const G = PHYS.G;
+        const G = STATE.params.G;   // live-tunable gravity strength
         const eps2 = PHYS.SOFTENING * PHYS.SOFTENING; // softening squared
 
         // Accumulate accelerations without touching the source array.
@@ -223,7 +323,7 @@
       // Circular orbital speed for a body of negligible mass around a
       // central mass M at distance r, using the integrator's own G.
       function circularOrbitSpeed(centralMass, r) {
-        return Math.sqrt((PHYS.G * centralMass) / r);
+        return Math.sqrt((STATE.params.G * centralMass) / r);
       }
 
       // Deep-copy a bodies array so the preset snapshot is never mutated.
@@ -275,11 +375,13 @@
         const fresh = createPresetBodies();
         STATE.initialBodies = cloneBodies(fresh); // frozen restore point
         STATE.bodies = cloneBodies(fresh);
+        STATE.trails = STATE.bodies.map(function () { return []; });
       }
 
       // Restore the exact initial preset state.
       function resetToPreset() {
         STATE.bodies = cloneBodies(STATE.initialBodies);
+        STATE.trails = STATE.bodies.map(function () { return []; });
       }
 
       /* ============================================================
@@ -455,6 +557,29 @@
         // Paint the deep-space background every frame.
         paintBackground();
 
+        // --- Motion trails: draw fading polylines behind each body ---
+        const trailLen = STATE.params.trailLength;
+        if (trailLen > 0 && STATE.flags.showTrails) {
+          const bodies = STATE.bodies;
+          for (let i = 0; i < bodies.length; i++) {
+            const trail = STATE.trails[i];
+            if (!trail || trail.length < 2) continue;
+            const color = bodyColor(bodies[i], i);
+            const n = trail.length;
+            for (let k = 1; k < n; k++) {
+              const alpha = (k / n) * 0.6; // fade older points
+              const p0 = worldToScreen(trail[k - 1].x, trail[k - 1].y);
+              const p1 = worldToScreen(trail[k].x, trail[k].y);
+              ctx.beginPath();
+              ctx.moveTo(p0[0], p0[1]);
+              ctx.lineTo(p1[0], p1[1]);
+              ctx.strokeStyle = hexToRgba(color, alpha);
+              ctx.lineWidth = 1.5;
+              ctx.stroke();
+            }
+          }
+        }
+
         // The camera transform is applied inside worldToScreen(), so both
         // bodies and any future trails automatically pan/zoom together.
         const bodies = STATE.bodies;
@@ -483,7 +608,18 @@
           for (let s = 0; s < substeps; s++) {
             STATE.bodies = gravityStep(STATE.bodies, dt);
           }
+          // Record trail positions (one sample per frame, not per substep).
+          const maxLen = STATE.params.trailLength;
+          for (let i = 0; i < STATE.bodies.length; i++) {
+            if (!STATE.trails[i]) STATE.trails[i] = [];
+            const b = STATE.bodies[i];
+            STATE.trails[i].push({ x: b.x, y: b.y });
+            if (STATE.trails[i].length > maxLen) {
+              STATE.trails[i].shift();
+            }
+          }
         }
+        updateReadouts();
         render();
         requestAnimationFrame(loop);
       }
@@ -491,12 +627,67 @@
       /* ============================================================
          ENTRY POINT
          ============================================================ */
-      // Wire up the Reset + Reset View controls (full panel comes later).
+      // Update the play/pause button label to match current state.
+      function syncPlayLabel() {
+        const btn = document.getElementById('btn-play');
+        if (btn) btn.textContent = STATE.flags.paused ? 'Play' : 'Pause';
+      }
+
+      // Toggle animation pause state and refresh the button label.
+      function togglePlayPause() {
+        STATE.flags.paused = !STATE.flags.paused;
+        syncPlayLabel();
+      }
+
+      // Refresh the live body-count readout.
+      function updateReadouts() {
+        const el = document.getElementById('readout-count');
+        if (el) el.textContent = String(STATE.bodies.length);
+      }
+
+      // Wire up all controls: play/pause, reset, reset-view, and the
+      // gravity / dt / trail-length sliders with live value labels.
       function setupControls() {
+        const btnPlay = document.getElementById('btn-play');
+        if (btnPlay) btnPlay.addEventListener('click', togglePlayPause);
+        syncPlayLabel();
+
         const btn = document.getElementById('btn-reset');
         if (btn) btn.addEventListener('click', resetToPreset);
         const btnView = document.getElementById('btn-reset-view');
         if (btnView) btnView.addEventListener('click', resetView);
+
+        // Gravity strength slider -> STATE.params.G (used by integrator).
+        const sGrav = document.getElementById('slider-gravity');
+        const vGrav = document.getElementById('val-gravity');
+        if (sGrav) {
+          sGrav.addEventListener('input', function () {
+            STATE.params.G = parseFloat(sGrav.value);
+            if (vGrav) vGrav.textContent = STATE.params.G.toFixed(2);
+          });
+        }
+
+        // Simulation speed (dt) slider -> STATE.params.dt.
+        const sDt = document.getElementById('slider-dt');
+        const vDt = document.getElementById('val-dt');
+        if (sDt) {
+          sDt.addEventListener('input', function () {
+            STATE.params.dt = parseFloat(sDt.value);
+            if (vDt) vDt.textContent = STATE.params.dt.toFixed(3);
+          });
+        }
+
+        // Trail length slider -> STATE.params.trailLength.
+        const sTrail = document.getElementById('slider-trail');
+        const vTrail = document.getElementById('val-trail');
+        if (sTrail) {
+          sTrail.addEventListener('input', function () {
+            STATE.params.trailLength = parseInt(sTrail.value, 10);
+            if (vTrail) vTrail.textContent = String(STATE.params.trailLength);
+          });
+        }
+
+        updateReadouts();
       }
 
       /* ============================================================
