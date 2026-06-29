@@ -25,11 +25,45 @@
         height: 100vh;
         cursor: crosshair;
       }
+
+      /* ============================================================
+         CONTROLS — minimal overlay (Reset button).
+         Full control panel is layered in by a downstream task.
+         ============================================================ */
+      #controls {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        display: flex;
+        gap: 8px;
+      }
+      #controls button {
+        font-family: inherit;
+        font-size: 0.85rem;
+        color: #eee;
+        background: rgba(20, 24, 34, 0.75);
+        border: 1px solid rgba(120, 140, 180, 0.4);
+        border-radius: 6px;
+        padding: 6px 14px;
+        cursor: pointer;
+        backdrop-filter: blur(4px);
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      #controls button:hover {
+        background: rgba(40, 48, 64, 0.85);
+        border-color: rgba(160, 180, 220, 0.7);
+      }
     </style>
   </head>
   <body>
     <!-- Full-viewport canvas; all rendering happens here -->
     <canvas id="stage"></canvas>
+
+    <!-- Minimal controls; expanded by downstream tasks. -->
+    <div id="controls">
+      <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
+    </div>
 
     <script>
       /* ============================================================
@@ -40,8 +74,16 @@
         SOFTENING: 5.0,         // softening factor to avoid singularities
         TRAIL_ALPHA: 0.12,      // motion-trail fade alpha
         MAX_BODIES: 500,        // hard cap for safety
-        DT: 0.5,                // default integration timestep
-        SUBSTEPS: 2,            // physics substeps per frame
+        DT: 0.05,               // default integration timestep (stable for orbits)
+        SUBSTEPS: 4,            // physics substeps per frame
+        // Rendering scale: world units -> pixels. Bodies are positioned in
+        // world space around the origin; the camera (downstream task) will
+        // eventually pan/zoom this view.
+        PIXELS_PER_UNIT: 1.5,
+        // Body radius scaling: radius = MASS_RADIUS_K * mass^(1/3).
+        // Cube-root keeps surface gravity sensible and sizes readable.
+        MASS_RADIUS_K: 0.8,
+        MASS_RADIUS_MIN: 2.5,   // minimum drawn radius in pixels
       });
 
       /* ============================================================
@@ -52,6 +94,7 @@
         canvas: null,
         ctx: null,
         bodies: [],
+        initialBodies: [],      // frozen snapshot for exact Reset restores
         camera: { x: 0, y: 0, zoom: 1 },
         params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS },
         input: { mouseX: 0, mouseY: 0, dragging: false },
@@ -143,14 +186,117 @@
       window.gravityStep = gravityStep;
 
       /* ============================================================
-         RENDER — clears the canvas each frame.
-         Full rendering is layered in by downstream tasks.
+         PRESET — stable starting system.
+         A massive central star with several planets on near-circular
+         orbits. Velocities use the circular-orbit speed v = √(G·M/r)
+         (computed from the SAME PHYS constants the integrator uses),
+         so the system stays bound without collapsing or escaping.
          ============================================================ */
+
+      // Circular orbital speed for a body of negligible mass around a
+      // central mass M at distance r, using the integrator's own G.
+      function circularOrbitSpeed(centralMass, r) {
+        return Math.sqrt((PHYS.G * centralMass) / r);
+      }
+
+      // Deep-copy a bodies array so the preset snapshot is never mutated.
+      function cloneBodies(bodies) {
+        return bodies.map(function (b) {
+          return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, mass: b.mass };
+        });
+      }
+
+      // Build the initial preset. Returns a fresh bodies array each call.
+      function createPresetBodies() {
+        const G = PHYS.G;
+        const M = 1e6;                 // heavy central star
+        const star = { x: 0, y: 0, vx: 0, vy: 0, mass: M };
+
+        // Planets: [orbital radius, mass, color]. Radii are in world units;
+        // velocities are set below for circular orbits.
+        const planets = [
+          { r: 90,  mass: 50,   color: '#ffcc66' }, // inner, warm
+          { r: 150, mass: 120,  color: '#66ccff' }, // mid, blue
+          { r: 220, mass: 80,   color: '#ff6688' }, // outer, pink
+          { r: 300, mass: 200,  color: '#88ff99' }, // far, green (gas giant)
+        ];
+
+        const bodies = [star];
+        for (let i = 0; i < planets.length; i++) {
+          const p = planets[i];
+          const v = circularOrbitSpeed(M, p.r); // tangential speed
+          // Start each planet on the +x axis, velocity in +y for a
+          // counter-clockwise orbit. A small phase offset per planet keeps
+          // them from lining up while staying on independent circles.
+          const angle = (i * Math.PI) / 2.5;
+          bodies.push({
+            x: p.r * Math.cos(angle),
+            y: p.r * Math.sin(angle),
+            // Tangential velocity: rotate (0, v) by `angle`.
+            vx: -v * Math.sin(angle),
+            vy:  v * Math.cos(angle),
+            mass: p.mass,
+            color: p.color,
+          });
+        }
+        return bodies;
+      }
+
+      // Load (or reload) the preset into STATE, capturing an immutable
+      // snapshot so Reset can restore the exact initial configuration.
+      function loadPreset() {
+        const fresh = createPresetBodies();
+        STATE.initialBodies = cloneBodies(fresh); // frozen restore point
+        STATE.bodies = cloneBodies(fresh);
+      }
+
+      // Restore the exact initial preset state.
+      function resetToPreset() {
+        STATE.bodies = cloneBodies(STATE.initialBodies);
+      }
+
+      /* ============================================================
+         RENDER — draws bodies each frame.
+         Body radius scales with mass (cube-root), satisfying the
+         "mass affects rendered body size" requirement. The richer
+         glow / deep-space palette is layered in by a downstream task.
+         ============================================================ */
+
+      // World -> screen projection. Centred on the viewport; the camera
+      // (downstream task) will eventually drive pan/zoom.
+      function worldToScreen(x, y) {
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const s = CONFIG.PIXELS_PER_UNIT;
+        return [cx + x * s, cy + y * s];
+      }
+
+      // Mass -> drawn radius (pixels). Cube-root scaling so a 10× mass
+      // increase yields ~2.15× radius (readable, not explosive).
+      function massToRadius(mass) {
+        return Math.max(
+          CONFIG.MASS_RADIUS_MIN,
+          CONFIG.MASS_RADIUS_K * Math.cbrt(mass)
+        );
+      }
+
       function render() {
         const ctx = STATE.ctx;
         if (!ctx) return;
         // Clear the full viewport every frame.
         ctx.clearRect(0, 0, STATE.canvas.width, STATE.canvas.height);
+
+        const bodies = STATE.bodies;
+        for (let i = 0; i < bodies.length; i++) {
+          const b = bodies[i];
+          const sx = worldToScreen(b.x, b.y);
+          const radius = massToRadius(b.mass);
+          ctx.beginPath();
+          ctx.arc(sx[0], sx[1], radius, 0, 2 * Math.PI);
+          // Central star is bright; planets use their assigned color.
+          ctx.fillStyle = b.color || (i === 0 ? '#ffe08a' : '#cccccc');
+          ctx.fill();
+        }
       }
 
       /* ============================================================
@@ -158,7 +304,13 @@
          ============================================================ */
       function loop() {
         if (!STATE.flags.paused) {
-          // Physics step reserved for downstream integrator task.
+          // Advance physics using the existing integrator. Substeps keep
+          // the effective timestep small for orbital stability.
+          const dt = STATE.params.dt;
+          const substeps = STATE.params.substeps;
+          for (let s = 0; s < substeps; s++) {
+            STATE.bodies = gravityStep(STATE.bodies, dt);
+          }
         }
         render();
         requestAnimationFrame(loop);
@@ -167,8 +319,16 @@
       /* ============================================================
          ENTRY POINT
          ============================================================ */
+      // Wire up the Reset control (full control panel comes later).
+      function setupControls() {
+        const btn = document.getElementById('btn-reset');
+        if (btn) btn.addEventListener('click', resetToPreset);
+      }
+
       function init() {
         setupCanvas();
+        loadPreset();          // initialise bodies before the first frame
+        setupControls();
         requestAnimationFrame(loop);
       }
 
