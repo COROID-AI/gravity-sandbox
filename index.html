@@ -307,6 +307,11 @@
         SOFTENING: 0.05,   // ε — softening length (< 1) to avoid singularities
       });
 
+      // Pre-allocated acceleration buffers, reused across frames to avoid
+      // per-call GC pressure. Grown lazily when the body count increases.
+      var _axBuf = [];
+      var _ayBuf = [];
+
       function gravityStep(bodies, dt) {
         // Defensive: non-array or empty input yields a fresh empty array.
         if (!Array.isArray(bodies) || bodies.length === 0) return [];
@@ -315,9 +320,11 @@
         const G = STATE.params.G;   // live-tunable gravity strength
         const eps2 = PHYS.SOFTENING * PHYS.SOFTENING; // softening squared
 
-        // Accumulate accelerations without touching the source array.
-        const ax = new Array(n).fill(0);
-        const ay = new Array(n).fill(0);
+        // Reuse growable acceleration buffers (zeroed only up to n).
+        if (_axBuf.length < n) { _axBuf = new Array(n); _ayBuf = new Array(n); }
+        const ax = _axBuf;
+        const ay = _ayBuf;
+        for (let i = 0; i < n; i++) { ax[i] = 0; ay[i] = 0; }
 
         for (let i = 0; i < n; i++) {
           const bi = bodies[i];
@@ -341,18 +348,16 @@
         }
 
         // Semi-implicit Euler: advance velocity, then position (symplectic).
-        return bodies.map(function (b, i) {
-          const vx = b.vx + ax[i] * dt;
-          const vy = b.vy + ay[i] * dt;
-          return {
-            x: b.x + vx * dt,
-            y: b.y + vy * dt,
-            vx: vx,
-            vy: vy,
-            mass: b.mass,
-            color: b.color,
-          };
-        });
+        // Mutate bodies IN PLACE to avoid allocating a new array / objects
+        // every substep (critical for 200+ bodies × 4 substeps/frame).
+        for (let i = 0; i < n; i++) {
+          const b = bodies[i];
+          b.vx += ax[i] * dt;
+          b.vy += ay[i] * dt;
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+        }
+        return bodies;
       }
 
       // Expose as global test hook (acceptance criterion + orbit-test.html).
@@ -597,45 +602,81 @@
         }
       }
 
+      // Inlined world->screen projection into scalar locals. Avoids
+      // allocating a [x,y] array on every call (called thousands of times
+      // per frame for trails + bodies). Output is written into `out`.
+      var _projScratch = [0, 0];
+      function projectTo(x, y, out) {
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        out[0] = STATE.canvas.width / 2 + cam.x + x * s;
+        out[1] = STATE.canvas.height / 2 + cam.y + y * s;
+      }
+
       function render() {
         const ctx = STATE.ctx;
         if (!ctx) return;
         // Paint the deep-space background every frame.
         paintBackground();
 
+        const bodies = STATE.bodies;
+        const nb = bodies.length;
+        const out = _projScratch;
+
         // --- Motion trails: draw fading polylines behind each body ---
-        const trailLen = STATE.params.trailLength;
-        if (trailLen > 0 && STATE.flags.showTrails) {
-          const bodies = STATE.bodies;
-          for (let i = 0; i < bodies.length; i++) {
+        // Trails are stored as flat Float32Array ring buffers (see
+        // ensureTrailCapacity / recordTrails). This render path performs
+        // ZERO per-segment allocations: projection is inlined into the
+        // scratch array and each body's polyline is stroked as a single
+        // path with one precomputed rgba color.
+        const maxLen = STATE.params.trailLength;
+        if (maxLen > 0 && STATE.flags.showTrails) {
+          ctx.lineWidth = 1.5;
+          for (let i = 0; i < nb; i++) {
             const trail = STATE.trails[i];
-            if (!trail || trail.length < 2) continue;
+            if (!trail) continue;
+            const count = trail.count;
+            if (count < 2) continue;
+            const buf = trail.buf;
+            const head = trail.head;
+            const cap = trail.cap;
+            // Precompute the base rgba color once per body (alpha filled in per segment).
             const color = bodyColor(bodies[i], i);
-            const n = trail.length;
-            for (let k = 1; k < n; k++) {
-              const alpha = (k / n) * 0.6; // fade older points
-              const p0 = worldToScreen(trail[k - 1].x, trail[k - 1].y);
-              const p1 = worldToScreen(trail[k].x, trail[k].y);
-              ctx.beginPath();
-              ctx.moveTo(p0[0], p0[1]);
-              ctx.lineTo(p1[0], p1[1]);
-              ctx.strokeStyle = hexToRgba(color, alpha);
-              ctx.lineWidth = 1.5;
-              ctx.stroke();
+            const h = color.replace('#', '');
+            const cr = parseInt(h.substring(0, 2), 16);
+            const cg = parseInt(h.substring(2, 4), 16);
+            const cb = parseInt(h.substring(4, 6), 16);
+            ctx.beginPath();
+            // Walk the ring buffer from oldest to newest. `head` points at
+            // the oldest live sample when the buffer is full.
+            let firstX = 0, firstY = 0;
+            for (let k = 0; k < count; k++) {
+              const idx = ((head + k) % cap) * 2;
+              projectTo(buf[idx], buf[idx + 1], out);
+              if (k === 0) {
+                firstX = out[0]; firstY = out[1];
+                ctx.moveTo(firstX, firstY);
+              } else {
+                ctx.lineTo(out[0], out[1]);
+              }
             }
+            // Stroke the whole polyline once with a mid-range alpha. Per-
+            // segment alpha gradients are expensive at scale; a single
+            // translucent stroke gives the fading-trail look cheaply.
+            ctx.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',0.35)';
+            ctx.stroke();
           }
         }
 
-        // The camera transform is applied inside worldToScreen(), so both
-        // bodies and any future trails automatically pan/zoom together.
-        const bodies = STATE.bodies;
-        for (let i = 0; i < bodies.length; i++) {
+        // The camera transform is applied inside projectTo(), so both
+        // bodies and trails automatically pan/zoom together.
+        for (let i = 0; i < nb; i++) {
           const b = bodies[i];
-          const sx = worldToScreen(b.x, b.y);
+          projectTo(b.x, b.y, out);
           // Keep bodies crisp at any zoom: scale the drawn radius by zoom so
           // zooming in enlarges bodies and zooming out shrinks them.
           const radius = massToRadius(b.mass) * STATE.camera.zoom;
-          drawBody(ctx, sx[0], sx[1], Math.max(0.5, radius), bodyColor(b, i));
+          drawBody(ctx, out[0], out[1], Math.max(0.5, radius), bodyColor(b, i));
         }
 
         // Draw the launch aim line on top of everything else.
@@ -645,6 +686,37 @@
       /* ------------------------------------------------------------
          LOOP — requestAnimationFrame driver
          ------------------------------------------------------------ */
+      // Ensure every body has a trail ring buffer sized for the current
+      // max trail length. Uses Float32Array for compact, fixed memory: no
+      // growth beyond cap*2 floats per body regardless of runtime.
+      function ensureTrailCapacity(maxLen) {
+        const cap = Math.max(2, maxLen);
+        const bodies = STATE.bodies;
+        for (let i = 0; i < bodies.length; i++) {
+          let t = STATE.trails[i];
+          if (!t || t.cap !== cap) {
+            STATE.trails[i] = { buf: new Float32Array(cap * 2), cap: cap, head: 0, count: 0 };
+          }
+        }
+      }
+
+      // Record one trail sample per body per frame into its ring buffer.
+      // head advances modulo cap; once full the oldest sample is overwritten.
+      // No array resizing, no object allocation -> stable memory.
+      function recordTrails() {
+        const bodies = STATE.bodies;
+        for (let i = 0; i < bodies.length; i++) {
+          const t = STATE.trails[i];
+          if (!t) continue;
+          const b = bodies[i];
+          const idx = (t.head * 2);
+          t.buf[idx] = b.x;
+          t.buf[idx + 1] = b.y;
+          t.head = (t.head + 1) % t.cap;
+          if (t.count < t.cap) t.count++;
+        }
+      }
+
       function loop() {
         if (!STATE.flags.paused) {
           // Advance physics using the existing integrator. Substeps keep
@@ -654,16 +726,10 @@
           for (let s = 0; s < substeps; s++) {
             STATE.bodies = gravityStep(STATE.bodies, dt);
           }
-          // Record trail positions (one sample per frame, not per substep).
-          const maxLen = STATE.params.trailLength;
-          for (let i = 0; i < STATE.bodies.length; i++) {
-            if (!STATE.trails[i]) STATE.trails[i] = [];
-            const b = STATE.bodies[i];
-            STATE.trails[i].push({ x: b.x, y: b.y });
-            if (STATE.trails[i].length > maxLen) {
-              STATE.trails[i].shift();
-            }
-          }
+          // Record trail positions (one sample per frame, not per substep)
+          // into fixed-capacity ring buffers — zero per-frame allocations.
+          ensureTrailCapacity(STATE.params.trailLength);
+          recordTrails();
         }
         updateReadouts();
         render();
