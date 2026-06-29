@@ -65,6 +65,7 @@
     <div id="controls">
       <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
       <button id="btn-reset-view" type="button" title="Reset pan and zoom">Reset View</button>
+      <button id="btn-random-system" type="button" title="Spawn a stable random mini system">Add Random System</button>
     </div>
 
     <!-- Credit label (DOM overlay, independent of camera transform).
@@ -211,6 +212,65 @@
 
       // Expose as global test hook (acceptance criterion + orbit-test.html).
       window.gravityStep = gravityStep;
+
+      /* ============================================================
+         MERGING COLLISIONS — when two bodies overlap (centre distance
+         less than the sum of their radii), they merge into one body.
+         Conservation laws applied:
+           - Mass:      M = m₁ + m₂
+           - Momentum:  M·V = m₁·v₁ + m₂·v₂  =>  V = (m₁·v₁ + m₂·v₂) / M
+           - Position:  centre of mass  R = (m₁·r₁ + m₂·r₂) / M
+         The merged body keeps the colour of the more massive partner so
+         large stars visually absorb smaller impactors. Radii are derived
+         from mass via massToRadius() (cube-root), so the combined mass
+         automatically yields a larger body (rubric requirement C).
+         Returns a NEW bodies array; input is never mutated.
+         ============================================================ */
+      function mergeCollisions(bodies) {
+        if (!Array.isArray(bodies) || bodies.length < 2) {
+          return Array.isArray(bodies) ? bodies.slice() : [];
+        }
+
+        // Work on a mutable copy; `alive[i]` tracks whether body i has been
+        // absorbed into another body during this sweep.
+        const n = bodies.length;
+        const alive = new Array(n).fill(true);
+        const merged = [];
+
+        for (let i = 0; i < n; i++) {
+          if (!alive[i]) continue;
+          let a = bodies[i];
+          for (let j = i + 1; j < n; j++) {
+            if (!alive[j]) continue;
+            const b = bodies[j];
+            // Overlap test in WORLD space: convert masses to world radii.
+            const ra = massToRadius(a.mass);
+            const rb = massToRadius(b.mass);
+            const dx = b.x - a.x;
+            const dy = b.y - a.y;
+            const dist = Math.hypot(dx, dy);
+            if (dist <= ra + rb) {
+              // Merge b into a: conserve mass, momentum, and locate the
+              // centre of mass. Guard against zero total mass (NaN safety).
+              const M = a.mass + b.mass;
+              const safeM = M > 0 ? M : 1;
+              const nx = (a.x * a.mass + b.x * b.mass) / safeM;
+              const ny = (a.y * a.mass + b.y * b.mass) / safeM;
+              const nvx = (a.vx * a.mass + b.vx * b.mass) / safeM;
+              const nvy = (a.vy * a.mass + b.vy * b.mass) / safeM;
+              // Keep the more massive partner's colour for visual continuity.
+              const color = a.mass >= b.mass ? a.color : b.color;
+              a = { x: nx, y: ny, vx: nvx, vy: nvy, mass: M, color: color };
+              alive[j] = false; // b absorbed
+            }
+          }
+          merged.push(a);
+        }
+        return merged;
+      }
+
+      // Expose merge logic as a global test hook for acceptance tests.
+      window.mergeCollisions = mergeCollisions;
 
       /* ============================================================
          PRESET — stable starting system.
@@ -483,6 +543,9 @@
           for (let s = 0; s < substeps; s++) {
             STATE.bodies = gravityStep(STATE.bodies, dt);
           }
+          // Resolve merging collisions once per frame (after all substeps)
+          // so overlapping bodies combine while conserving momentum & mass.
+          STATE.bodies = mergeCollisions(STATE.bodies);
         }
         render();
         requestAnimationFrame(loop);
@@ -491,12 +554,66 @@
       /* ============================================================
          ENTRY POINT
          ============================================================ */
-      // Wire up the Reset + Reset View controls (full panel comes later).
+      // Wire up the Reset + Reset View + Add Random System controls.
       function setupControls() {
         const btn = document.getElementById('btn-reset');
         if (btn) btn.addEventListener('click', resetToPreset);
         const btnView = document.getElementById('btn-reset-view');
         if (btnView) btnView.addEventListener('click', resetView);
+        const btnRandom = document.getElementById('btn-random-system');
+        if (btnRandom) btnRandom.addEventListener('click', addRandomSystem);
+      }
+
+      /* ============================================================
+         RANDOM SYSTEM — spawns a stable mini system of 2-4 bodies at a
+         random screen location. A central mass is orbited by 1-3 planets
+         on near-circular orbits (v = √(G·M/r)), so the spawned system is
+         gravitationally bound and stable rather than flying apart.
+         Positions are chosen in world space near the current view centre
+         so the new system is visible without manual panning.
+         ============================================================ */
+      function addRandomSystem() {
+        // Pick a spawn centre near the middle of the current view (world).
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const viewCenter = screenToWorld(cx, cy);
+        // Random offset so repeated spawns don't perfectly overlap.
+        const offX = (Math.random() - 0.5) * 200;
+        const offY = (Math.random() - 0.5) * 200;
+        const ox = viewCenter[0] + offX;
+        const oy = viewCenter[1] + offY;
+
+        // Central star: random mass in a stable range.
+        const M = 50000 + Math.random() * 150000;
+        const starColor = '#ffe08a';
+        const bodies = [{ x: ox, y: oy, vx: 0, vy: 0, mass: M, color: starColor }];
+
+        // 1-3 orbiting planets (total 2-4 bodies including the star).
+        const planetCount = 1 + Math.floor(Math.random() * 3);
+        const palette = ['#ffcc66', '#66ccff', '#ff6688', '#88ff99', '#cc88ff'];
+        for (let i = 0; i < planetCount; i++) {
+          // Orbital radius in world units; keep planets separated.
+          const r = 60 + i * (50 + Math.random() * 40) + Math.random() * 30;
+          const v = circularOrbitSpeed(M, r); // stable circular speed
+          const angle = Math.random() * 2 * Math.PI;
+          const mass = 20 + Math.random() * 180;
+          const color = palette[Math.floor(Math.random() * palette.length)];
+          bodies.push({
+            x: ox + r * Math.cos(angle),
+            y: oy + r * Math.sin(angle),
+            // Tangential velocity for a counter-clockwise orbit.
+            vx: -v * Math.sin(angle),
+            vy:  v * Math.cos(angle),
+            mass: mass,
+            color: color,
+          });
+        }
+
+        // Respect the global body cap; append what fits.
+        const room = CONFIG.MAX_BODIES - STATE.bodies.length;
+        for (let i = 0; i < Math.min(room, bodies.length); i++) {
+          STATE.bodies.push(bodies[i]);
+        }
       }
 
       /* ============================================================
