@@ -178,6 +178,7 @@
             vx: vx,
             vy: vy,
             mass: b.mass,
+            color: b.color,
           };
         });
       }
@@ -202,7 +203,7 @@
       // Deep-copy a bodies array so the preset snapshot is never mutated.
       function cloneBodies(bodies) {
         return bodies.map(function (b) {
-          return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, mass: b.mass };
+          return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, mass: b.mass, color: b.color };
         });
       }
 
@@ -280,22 +281,78 @@
         );
       }
 
+      // Deep-space background fill. Painted every frame so the canvas
+      // stays a cohesive dark void (no default white/transparent overlay).
+      function paintBackground() {
+        const ctx = STATE.ctx;
+        const w = STATE.canvas.width;
+        const h = STATE.canvas.height;
+        // Subtle radial vignette: near-black centre, darker edges.
+        const grad = ctx.createRadialGradient(
+          w / 2, h / 2, 0,
+          w / 2, h / 2, Math.max(w, h) * 0.75
+        );
+        grad.addColorStop(0, '#0a0e1a');
+        grad.addColorStop(1, '#02030a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      // Convert a hex (#rrggbb) color to an rgba() string with the given
+      // alpha. Used to build translucent glow halos.
+      function hexToRgba(hex, alpha) {
+        const h = hex.replace('#', '');
+        const r = parseInt(h.substring(0, 2), 16);
+        const g = parseInt(h.substring(2, 4), 16);
+        const b = parseInt(h.substring(4, 6), 16);
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+      }
+
+      // Resolve a body's display color (central star defaults to warm gold).
+      function bodyColor(b, i) {
+        return b.color || (i === 0 ? '#ffe08a' : '#cccccc');
+      }
+
+      // Draw a single body as an anti-aliased circle with a radial
+      // gradient core and a soft outer glow halo.
+      function drawBody(ctx, sx, sy, radius, color) {
+        // --- Glow halo (drawn first, behind the core) ---
+        const glowR = radius * 3.2;
+        const glow = ctx.createRadialGradient(sx, sy, radius * 0.4, sx, sy, glowR);
+        glow.addColorStop(0, hexToRgba(color, 0.55));
+        glow.addColorStop(0.4, hexToRgba(color, 0.18));
+        glow.addColorStop(1, hexToRgba(color, 0));
+        ctx.beginPath();
+        ctx.arc(sx, sy, glowR, 0, 2 * Math.PI);
+        ctx.fillStyle = glow;
+        ctx.fill();
+
+        // --- Body core: bright centre fading to the body color ---
+        const core = ctx.createRadialGradient(
+          sx - radius * 0.3, sy - radius * 0.3, 0,
+          sx, sy, radius
+        );
+        core.addColorStop(0, '#ffffff');
+        core.addColorStop(0.25, hexToRgba(color, 0.95));
+        core.addColorStop(1, color);
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, 2 * Math.PI);
+        ctx.fillStyle = core;
+        ctx.fill();
+      }
+
       function render() {
         const ctx = STATE.ctx;
         if (!ctx) return;
-        // Clear the full viewport every frame.
-        ctx.clearRect(0, 0, STATE.canvas.width, STATE.canvas.height);
+        // Paint the deep-space background every frame.
+        paintBackground();
 
         const bodies = STATE.bodies;
         for (let i = 0; i < bodies.length; i++) {
           const b = bodies[i];
           const sx = worldToScreen(b.x, b.y);
           const radius = massToRadius(b.mass);
-          ctx.beginPath();
-          ctx.arc(sx[0], sx[1], radius, 0, 2 * Math.PI);
-          // Central star is bright; planets use their assigned color.
-          ctx.fillStyle = b.color || (i === 0 ? '#ffe08a' : '#cccccc');
-          ctx.fill();
+          drawBody(ctx, sx[0], sx[1], radius, bodyColor(b, i));
         }
       }
 
