@@ -4,17 +4,1046 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Gravity Sandbox</title>
+    <style>
+      /* ------------------------------------------------------------
+         BASE STYLES — minimal, no external fonts or assets
+         (Banner uses '-' not '=' to avoid false conflict-marker flags)
+         ------------------------------------------------------------ */
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+
+      html, body {
+        width: 100%;
+        height: 100%;
+        overflow: hidden;          /* no scrollbars */
+        background: #000;          /* deep-space black */
+        font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+        color: #eee;
+      }
+
+      #stage {
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        cursor: crosshair;
+      }
+
+      /* ------------------------------------------------------------
+         CONTROLS — overlay panel with play/pause, reset, sliders,
+         and a live body-count readout.
+         ------------------------------------------------------------ */
+      #controls {
+        position: fixed;
+        top: 12px;
+        left: 12px;
+        z-index: 10;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        background: rgba(14, 18, 28, 0.82);
+        border: 1px solid rgba(120, 140, 180, 0.28);
+        border-radius: 10px;
+        padding: 12px 14px;
+        backdrop-filter: blur(8px);
+        min-width: 230px;
+        user-select: none;
+      }
+      #controls .btn-row {
+        display: flex;
+        gap: 8px;
+      }
+      #controls button {
+        flex: 1;
+        font-family: inherit;
+        font-size: 0.85rem;
+        color: #eee;
+        background: rgba(28, 34, 48, 0.85);
+        border: 1px solid rgba(120, 140, 180, 0.4);
+        border-radius: 6px;
+        padding: 7px 10px;
+        cursor: pointer;
+        transition: background 0.15s ease, border-color 0.15s ease;
+      }
+      #controls button:hover {
+        background: rgba(48, 56, 76, 0.9);
+        border-color: rgba(160, 180, 220, 0.7);
+      }
+      #controls button:active {
+        background: rgba(60, 70, 92, 0.95);
+      }
+      #controls .slider-group {
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
+      }
+      #controls .slider-label {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.72rem;
+        color: rgba(200, 210, 230, 0.8);
+        letter-spacing: 0.02em;
+      }
+      #controls .slider-label .val {
+        color: #8fcfff;
+        font-variant-numeric: tabular-nums;
+      }
+      #controls input[type='range'] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 4px;
+        background: rgba(120, 140, 180, 0.3);
+        border-radius: 3px;
+        outline: none;
+        cursor: pointer;
+      }
+      #controls input[type='range']::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #6cb6ff;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+      }
+      #controls input[type='range']::-moz-range-thumb {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #6cb6ff;
+        border: 2px solid rgba(255, 255, 255, 0.85);
+        cursor: pointer;
+      }
+      #controls .readout {
+        font-size: 0.72rem;
+        color: rgba(200, 210, 230, 0.7);
+        letter-spacing: 0.02em;
+      }
+      #controls .readout .val {
+        color: #8fffaf;
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+      }
+
+      /* Inline usage hint shown on first load. */
+      #hint {
+        position: fixed;
+        bottom: 10px;
+        left: 14px;
+        z-index: 10;
+        max-width: 320px;
+        font-size: 0.72rem;
+        line-height: 1.5;
+        letter-spacing: 0.02em;
+        color: rgba(200, 210, 230, 0.7);
+        background: rgba(14, 18, 28, 0.7);
+        border: 1px solid rgba(120, 140, 180, 0.22);
+        border-radius: 8px;
+        padding: 8px 12px;
+        backdrop-filter: blur(6px);
+        user-select: none;
+        transition: opacity 0.4s ease;
+      }
+      #hint kbd {
+        display: inline-block;
+        font-family: inherit;
+        font-size: 0.68rem;
+        color: #8fcfff;
+        background: rgba(28, 34, 48, 0.85);
+        border: 1px solid rgba(120, 140, 180, 0.4);
+        border-radius: 4px;
+        padding: 1px 5px;
+        margin: 0 1px;
+      }
+      #hint.hidden {
+        opacity: 0;
+        pointer-events: none;
+      }
+
+    </style>
   </head>
   <body>
-    <!--
-      Implement the 2D N-body gravity sandbox here, following README.md.
+    <!-- Full-viewport canvas; all rendering happens here -->
+    <canvas id="stage"></canvas>
 
-      Everything (HTML, CSS, JS) must live in this single file:
-        - no external requests, no libraries, no build step
-        - must run from file:// offline
+    <!-- Control panel: play/pause, reset, parameter sliders, body count. -->
+    <div id="controls">
+      <div class="btn-row">
+        <button id="btn-play" type="button" title="Play / Pause animation">Pause</button>
+        <button id="btn-reset" type="button" title="Reset to the starting system">Reset</button>
+      </div>
+      <div class="btn-row">
+        <button id="btn-reset-view" type="button" title="Reset pan and zoom">Reset View</button>
+      </div>
 
-      Optional: expose `window.gravityStep(bodies, dt)` so orbit-test.html
-      can verify your physics automatically (see README.md).
-    -->
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Gravity Strength</span>
+          <span class="val" id="val-gravity">1.00</span>
+        </div>
+        <input id="slider-gravity" type="range" min="0" max="3" step="0.05" value="1" />
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Simulation Speed</span>
+          <span class="val" id="val-dt">0.050</span>
+        </div>
+        <input id="slider-dt" type="range" min="0" max="0.2" step="0.005" value="0.05" />
+      </div>
+
+      <div class="slider-group">
+        <div class="slider-label">
+          <span>Trail Length</span>
+          <span class="val" id="val-trail">60</span>
+        </div>
+        <input id="slider-trail" type="range" min="0" max="300" step="5" value="60" />
+      </div>
+
+      <div class="readout">Bodies: <span class="val" id="readout-count">0</span></div>
+    </div>
+
+    <!-- Concise inline usage hint, visible on first load. -->
+    <div id="hint">
+      <strong>How to use:</strong>
+      <kbd>Space</kbd> play/pause &middot;
+      <kbd>R</kbd> reset &middot;
+      drag to launch a body &middot;
+      scroll to zoom &middot;
+      Shift+drag to pan
+    </div>
+
+    <!-- Credit label (DOM overlay, independent of camera transform).
+         Inline styles only — system fonts, no external assets, fixed in the
+         bottom-right corner so it never overlaps controls or the simulation. -->
+    <div id="credit" style="position:fixed;bottom:10px;right:14px;z-index:10;font-family:ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;font-size:0.72rem;letter-spacing:0.04em;color:rgba(200, 210, 230, 0.55);pointer-events:none;user-select:none;">Built by Coroid</div>
+
+    <script>
+      /* ------------------------------------------------------------
+         CONFIG — tunable constants reserved for downstream tasks
+         ------------------------------------------------------------ */
+      const CONFIG = Object.freeze({
+        G: 1.0,                 // gravitational constant (tunable)
+        SOFTENING: 5.0,         // softening factor to avoid singularities
+        TRAIL_ALPHA: 0.12,      // motion-trail fade alpha
+        MAX_BODIES: 500,        // hard cap for safety
+        DT: 0.05,               // default integration timestep (stable for orbits)
+        SUBSTEPS: 4,            // physics substeps per frame
+        // Rendering scale: world units -> pixels. Bodies are positioned in
+        // world space around the origin; the camera (downstream task) will
+        // eventually pan/zoom this view.
+        PIXELS_PER_UNIT: 1.5,
+        // Body radius scaling: radius = MASS_RADIUS_K * mass^(1/3).
+        // Cube-root keeps surface gravity sensible and sizes readable.
+        MASS_RADIUS_K: 0.8,
+        MASS_RADIUS_MIN: 2.5,   // minimum drawn radius in pixels
+        // Launch interaction: drag vector -> initial velocity.
+        // The drag length (screen px) is scaled into world velocity units.
+        LAUNCH_VEL_SCALE: 0.08,
+        LAUNCH_MASS: 100,       // mass of a user-launched body
+        LAUNCH_COLOR: '#ffffff', // color of a user-launched body
+      });
+
+      /* ------------------------------------------------------------
+         STATE — global, extensible object for downstream modules
+         Reserved sections: camera, params, input, flags, bodies
+         ------------------------------------------------------------ */
+      const STATE = {
+        canvas: null,
+        ctx: null,
+        bodies: [],
+        initialBodies: [],      // frozen snapshot for exact Reset restores
+        camera: { x: 0, y: 0, zoom: 1 },
+        params: { G: CONFIG.G, dt: CONFIG.DT, substeps: CONFIG.SUBSTEPS, trailLength: 60 },
+        trails: [],               // per-body position history for motion trails
+        input: {
+          mouseX: 0, mouseY: 0, dragging: false,
+          // Pan / zoom navigation state (this task).
+          panning: false, panStartX: 0, panStartY: 0, camStartX: 0, camStartY: 0,
+          // Pinch-to-zoom tracking for touch devices.
+          pinching: false, pinchStartDist: 0, pinchStartZoom: 1,
+          pinchCenterX: 0, pinchCenterY: 0,
+          // Click-and-drag launch state. `launching` is true while a launch
+          // drag is in progress. launchWorld is the fixed world-space origin
+          // of the new body; launchCurX/Y track the current pointer in screen
+          // pixels so the aim line follows the cursor and the camera.
+          launching: false,
+          launchWorldX: 0, launchWorldY: 0,
+          launchCurX: 0, launchCurY: 0,
+        },
+        flags: { paused: false, showTrails: true, showHelp: true },
+      };
+
+      // Expose globally so downstream modules / console can inspect it.
+      window.STATE = STATE;
+      window.CONFIG = CONFIG;
+
+      /* ------------------------------------------------------------
+         CANVAS — sizing & resize handling
+         ------------------------------------------------------------ */
+      function setupCanvas() {
+        STATE.canvas = document.getElementById('stage');
+        STATE.ctx = STATE.canvas.getContext('2d');
+        resizeCanvas();
+        window.addEventListener('resize', resizeCanvas);
+      }
+
+      function resizeCanvas() {
+        // Match the viewport exactly; downstream tasks may add devicePixelRatio.
+        STATE.canvas.width = window.innerWidth;
+        STATE.canvas.height = window.innerHeight;
+      }
+
+      /* ------------------------------------------------------------
+         PHYSICS — Newtonian N-body integrator (pure function).
+         Pairwise gravity:  F = G·m₁·m₂ / (r² + ε²)
+         Integrator:        semi-implicit (symplectic) Euler
+                             vₙ₊₁ = vₙ + a·dt
+                             xₙ₊₁ = xₙ + vₙ₊₁·dt
+         Returns a NEW bodies array; the input is never mutated.
+         Signature contract: gravityStep(bodies, dt) -> bodies[]
+         ------------------------------------------------------------ */
+      const PHYS = Object.freeze({
+        SOFTENING: 0.05,   // ε — softening length (< 1) to avoid singularities
+      });
+
+      // Pre-allocated acceleration buffers, reused across frames to avoid
+      // per-call GC pressure. Grown lazily when the body count increases.
+      var _axBuf = [];
+      var _ayBuf = [];
+
+      function gravityStep(bodies, dt) {
+        // Defensive: non-array or empty input yields a fresh empty array.
+        if (!Array.isArray(bodies) || bodies.length === 0) return [];
+
+        const n = bodies.length;
+        const G = STATE.params.G;   // live-tunable gravity strength
+        const eps2 = PHYS.SOFTENING * PHYS.SOFTENING; // softening squared
+
+        // Reuse growable acceleration buffers (zeroed only up to n).
+        if (_axBuf.length < n) { _axBuf = new Array(n); _ayBuf = new Array(n); }
+        const ax = _axBuf;
+        const ay = _ayBuf;
+        for (let i = 0; i < n; i++) { ax[i] = 0; ay[i] = 0; }
+
+        for (let i = 0; i < n; i++) {
+          const bi = bodies[i];
+          for (let j = i + 1; j < n; j++) {
+            const bj = bodies[j];
+            const dx = bj.x - bi.x;
+            const dy = bj.y - bi.y;
+            // r² + ε²  — softening prevents division-by-zero / slingshots.
+            const r2 = dx * dx + dy * dy + eps2;
+            const invR = 1 / Math.sqrt(r2);
+            const invR3 = invR * invR * invR; // 1 / (r²+ε²)^(3/2)
+            // a_i += G·m_j·(r_j - r_i) / |r|³   (Newton's law of gravitation)
+            const gi = G * bj.mass * invR3;
+            ax[i] += gi * dx;
+            ay[i] += gi * dy;
+            // Equal & opposite reaction (Newton's third law).
+            const gj = G * bi.mass * invR3;
+            ax[j] -= gj * dx;
+            ay[j] -= gj * dy;
+          }
+        }
+
+        // Semi-implicit Euler: advance velocity, then position (symplectic).
+        // Mutate bodies IN PLACE to avoid allocating a new array / objects
+        // every substep (critical for 200+ bodies × 4 substeps/frame).
+        for (let i = 0; i < n; i++) {
+          const b = bodies[i];
+          b.vx += ax[i] * dt;
+          b.vy += ay[i] * dt;
+          b.x += b.vx * dt;
+          b.y += b.vy * dt;
+        }
+        return bodies;
+      }
+
+      // Expose as global test hook (acceptance criterion + orbit-test.html).
+      window.gravityStep = gravityStep;
+
+      /* ------------------------------------------------------------
+         PRESET — stable starting system.
+         A massive central star with several planets on near-circular
+         orbits. Velocities use the circular-orbit speed v = √(G·M/r)
+         (computed from the SAME PHYS constants the integrator uses),
+         so the system stays bound without collapsing or escaping.
+         ------------------------------------------------------------ */
+
+      // Circular orbital speed for a body of negligible mass around a
+      // central mass M at distance r, using the integrator's own G.
+      function circularOrbitSpeed(centralMass, r) {
+        return Math.sqrt((STATE.params.G * centralMass) / r);
+      }
+
+      // Deep-copy a bodies array so the preset snapshot is never mutated.
+      function cloneBodies(bodies) {
+        return bodies.map(function (b) {
+          return { x: b.x, y: b.y, vx: b.vx, vy: b.vy, mass: b.mass, color: b.color };
+        });
+      }
+
+      // Build the initial preset. Returns a fresh bodies array each call.
+      function createPresetBodies() {
+        const G = STATE.params.G;   // same gravity strength the integrator uses
+        const M = 1e6;                 // heavy central star
+        const star = { x: 0, y: 0, vx: 0, vy: 0, mass: M };
+
+        // Planets: [orbital radius, mass, color]. Radii are in world units;
+        // velocities are set below for circular orbits.
+        const planets = [
+          { r: 90,  mass: 50,   color: '#ffcc66' }, // inner, warm
+          { r: 150, mass: 120,  color: '#66ccff' }, // mid, blue
+          { r: 220, mass: 80,   color: '#ff6688' }, // outer, pink
+          { r: 300, mass: 200,  color: '#88ff99' }, // far, green (gas giant)
+        ];
+
+        const bodies = [star];
+        for (let i = 0; i < planets.length; i++) {
+          const p = planets[i];
+          const v = circularOrbitSpeed(M, p.r); // tangential speed
+          // Start each planet on the +x axis, velocity in +y for a
+          // counter-clockwise orbit. A small phase offset per planet keeps
+          // them from lining up while staying on independent circles.
+          const angle = (i * Math.PI) / 2.5;
+          bodies.push({
+            x: p.r * Math.cos(angle),
+            y: p.r * Math.sin(angle),
+            // Tangential velocity: rotate (0, v) by `angle`.
+            vx: -v * Math.sin(angle),
+            vy:  v * Math.cos(angle),
+            mass: p.mass,
+            color: p.color,
+          });
+        }
+        return bodies;
+      }
+
+      // Load (or reload) the preset into STATE, capturing an immutable
+      // snapshot so Reset can restore the exact initial configuration.
+      function loadPreset() {
+        const fresh = createPresetBodies();
+        STATE.initialBodies = cloneBodies(fresh); // frozen restore point
+        STATE.bodies = cloneBodies(fresh);
+        STATE.trails = STATE.bodies.map(function () { return []; });
+      }
+
+      // Restore the exact initial preset state.
+      function resetToPreset() {
+        STATE.bodies = cloneBodies(STATE.initialBodies);
+        STATE.trails = STATE.bodies.map(function () { return []; });
+      }
+
+      /* ------------------------------------------------------------
+         RENDER — draws bodies each frame.
+         Body radius scales with mass (cube-root), satisfying the
+         "mass affects rendered body size" requirement. The richer
+         glow / deep-space palette is layered in by a downstream task.
+         ------------------------------------------------------------ */
+
+      // World -> screen projection. Applies the camera transform:
+      //   1. scale world units by PIXELS_PER_UNIT and the camera zoom
+      //   2. translate by the camera pan offset (in screen pixels)
+      // The viewport centre is the rest origin; camera.x/y shift it.
+      function worldToScreen(x, y) {
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        return [cx + cam.x + x * s, cy + cam.y + y * s];
+      }
+
+      // Screen -> world projection (inverse of worldToScreen). Used to zoom
+      // around the cursor: convert the cursor to world space, adjust zoom,
+      // then re-anchor so that same world point stays under the cursor.
+      function screenToWorld(sx, sy) {
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        return [(sx - cx - cam.x) / s, (sy - cy - cam.y) / s];
+      }
+
+      // Zoom around a screen point, keeping that world point fixed under
+      // the cursor. `factor` > 1 zooms in, < 1 zooms out.
+      function zoomAtScreen(sx, sy, factor) {
+        const cam = STATE.camera;
+        const before = screenToWorld(sx, sy);
+        cam.zoom = Math.max(0.05, Math.min(50, cam.zoom * factor));
+        const after = screenToWorld(sx, sy);
+        // Compensate pan so the world point under the cursor is unchanged.
+        const cx = STATE.canvas.width / 2;
+        const cy = STATE.canvas.height / 2;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        cam.x += (after[0] - before[0]) * s;
+        cam.y += (after[1] - before[1]) * s;
+      }
+
+      // Reset the camera to the default (centred, 1× zoom).
+      function resetView() {
+        STATE.camera.x = 0;
+        STATE.camera.y = 0;
+        STATE.camera.zoom = 1;
+      }
+
+      // Mass -> drawn radius (pixels). Cube-root scaling so a 10× mass
+      // increase yields ~2.15× radius (readable, not explosive).
+      function massToRadius(mass) {
+        return Math.max(
+          CONFIG.MASS_RADIUS_MIN,
+          CONFIG.MASS_RADIUS_K * Math.cbrt(mass)
+        );
+      }
+
+      // Deep-space background fill. Painted every frame so the canvas
+      // stays a cohesive dark void (no default white/transparent overlay).
+      function paintBackground() {
+        const ctx = STATE.ctx;
+        const w = STATE.canvas.width;
+        const h = STATE.canvas.height;
+        // Subtle radial vignette: near-black centre, darker edges.
+        const grad = ctx.createRadialGradient(
+          w / 2, h / 2, 0,
+          w / 2, h / 2, Math.max(w, h) * 0.75
+        );
+        grad.addColorStop(0, '#0a0e1a');
+        grad.addColorStop(1, '#02030a');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, w, h);
+      }
+
+      // Convert a hex (#rrggbb) color to an rgba() string with the given
+      // alpha. Used to build translucent glow halos.
+      function hexToRgba(hex, alpha) {
+        const h = hex.replace('#', '');
+        const r = parseInt(h.substring(0, 2), 16);
+        const g = parseInt(h.substring(2, 4), 16);
+        const b = parseInt(h.substring(4, 6), 16);
+        return 'rgba(' + r + ',' + g + ',' + b + ',' + alpha + ')';
+      }
+
+      // Resolve a body's display color (central star defaults to warm gold).
+      function bodyColor(b, i) {
+        return b.color || (i === 0 ? '#ffe08a' : '#cccccc');
+      }
+
+      // Draw a single body as an anti-aliased circle with a radial
+      // gradient core and a soft outer glow halo.
+      function drawBody(ctx, sx, sy, radius, color) {
+        // --- Glow halo (drawn first, behind the core) ---
+        const glowR = radius * 3.2;
+        const glow = ctx.createRadialGradient(sx, sy, radius * 0.4, sx, sy, glowR);
+        glow.addColorStop(0, hexToRgba(color, 0.55));
+        glow.addColorStop(0.4, hexToRgba(color, 0.18));
+        glow.addColorStop(1, hexToRgba(color, 0));
+        ctx.beginPath();
+        ctx.arc(sx, sy, glowR, 0, 2 * Math.PI);
+        ctx.fillStyle = glow;
+        ctx.fill();
+
+        // --- Body core: bright centre fading to the body color ---
+        const core = ctx.createRadialGradient(
+          sx - radius * 0.3, sy - radius * 0.3, 0,
+          sx, sy, radius
+        );
+        core.addColorStop(0, '#ffffff');
+        core.addColorStop(0.25, hexToRgba(color, 0.95));
+        core.addColorStop(1, color);
+        ctx.beginPath();
+        ctx.arc(sx, sy, radius, 0, 2 * Math.PI);
+        ctx.fillStyle = core;
+        ctx.fill();
+      }
+
+      // Draw the launch aim line: from the launch origin (world space,
+      // projected through the current camera) to the current pointer
+      // position (screen space). Because the origin is re-projected every
+      // frame, the line stays anchored in the world as the camera pans/zooms.
+      function drawLaunchAim(ctx) {
+        const inp = STATE.input;
+        if (!inp.launching) return;
+        const start = worldToScreen(inp.launchWorldX, inp.launchWorldY);
+        const ex = inp.launchCurX;
+        const ey = inp.launchCurY;
+
+        // Dashed aim line.
+        ctx.save();
+        ctx.setLineDash([6, 5]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        ctx.beginPath();
+        ctx.moveTo(start[0], start[1]);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        ctx.restore();
+
+        // Marker at the launch origin.
+        ctx.beginPath();
+        ctx.arc(start[0], start[1], 4, 0, 2 * Math.PI);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fill();
+
+        // Arrowhead at the pointer indicating launch direction.
+        const dx = ex - start[0];
+        const dy = ey - start[1];
+        const len = Math.hypot(dx, dy);
+        if (len > 1) {
+          const ang = Math.atan2(dy, dx);
+          const ah = 10;
+          ctx.beginPath();
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - ah * Math.cos(ang - 0.4), ey - ah * Math.sin(ang - 0.4));
+          ctx.moveTo(ex, ey);
+          ctx.lineTo(ex - ah * Math.cos(ang + 0.4), ey - ah * Math.sin(ang + 0.4));
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+      }
+
+      // Inlined world->screen projection into scalar locals. Avoids
+      // allocating a [x,y] array on every call (called thousands of times
+      // per frame for trails + bodies). Output is written into `out`.
+      var _projScratch = [0, 0];
+      function projectTo(x, y, out) {
+        const cam = STATE.camera;
+        const s = CONFIG.PIXELS_PER_UNIT * cam.zoom;
+        out[0] = STATE.canvas.width / 2 + cam.x + x * s;
+        out[1] = STATE.canvas.height / 2 + cam.y + y * s;
+      }
+
+      function render() {
+        const ctx = STATE.ctx;
+        if (!ctx) return;
+        // Paint the deep-space background every frame.
+        paintBackground();
+
+        const bodies = STATE.bodies;
+        const nb = bodies.length;
+        const out = _projScratch;
+
+        // --- Motion trails: draw fading polylines behind each body ---
+        // Trails are stored as flat Float32Array ring buffers (see
+        // ensureTrailCapacity / recordTrails). This render path performs
+        // ZERO per-segment allocations: projection is inlined into the
+        // scratch array and each body's polyline is stroked as a single
+        // path with one precomputed rgba color.
+        const maxLen = STATE.params.trailLength;
+        if (maxLen > 0 && STATE.flags.showTrails) {
+          ctx.lineWidth = 1.5;
+          for (let i = 0; i < nb; i++) {
+            const trail = STATE.trails[i];
+            if (!trail) continue;
+            const count = trail.count;
+            if (count < 2) continue;
+            const buf = trail.buf;
+            const head = trail.head;
+            const cap = trail.cap;
+            // Precompute the base rgba color once per body (alpha filled in per segment).
+            const color = bodyColor(bodies[i], i);
+            const h = color.replace('#', '');
+            const cr = parseInt(h.substring(0, 2), 16);
+            const cg = parseInt(h.substring(2, 4), 16);
+            const cb = parseInt(h.substring(4, 6), 16);
+            ctx.beginPath();
+            // Walk the ring buffer from oldest to newest. `head` points at
+            // the oldest live sample when the buffer is full.
+            let firstX = 0, firstY = 0;
+            for (let k = 0; k < count; k++) {
+              const idx = ((head + k) % cap) * 2;
+              projectTo(buf[idx], buf[idx + 1], out);
+              if (k === 0) {
+                firstX = out[0]; firstY = out[1];
+                ctx.moveTo(firstX, firstY);
+              } else {
+                ctx.lineTo(out[0], out[1]);
+              }
+            }
+            // Stroke the whole polyline once with a mid-range alpha. Per-
+            // segment alpha gradients are expensive at scale; a single
+            // translucent stroke gives the fading-trail look cheaply.
+            ctx.strokeStyle = 'rgba(' + cr + ',' + cg + ',' + cb + ',0.35)';
+            ctx.stroke();
+          }
+        }
+
+        // The camera transform is applied inside projectTo(), so both
+        // bodies and trails automatically pan/zoom together.
+        for (let i = 0; i < nb; i++) {
+          const b = bodies[i];
+          projectTo(b.x, b.y, out);
+          // Keep bodies crisp at any zoom: scale the drawn radius by zoom so
+          // zooming in enlarges bodies and zooming out shrinks them.
+          const radius = massToRadius(b.mass) * STATE.camera.zoom;
+          drawBody(ctx, out[0], out[1], Math.max(0.5, radius), bodyColor(b, i));
+        }
+
+        // Draw the launch aim line on top of everything else.
+        drawLaunchAim(ctx);
+      }
+
+      /* ------------------------------------------------------------
+         LOOP — requestAnimationFrame driver
+         ------------------------------------------------------------ */
+      // Ensure every body has a trail ring buffer sized for the current
+      // max trail length. Uses Float32Array for compact, fixed memory: no
+      // growth beyond cap*2 floats per body regardless of runtime.
+      function ensureTrailCapacity(maxLen) {
+        const cap = Math.max(2, maxLen);
+        const bodies = STATE.bodies;
+        for (let i = 0; i < bodies.length; i++) {
+          let t = STATE.trails[i];
+          if (!t || t.cap !== cap) {
+            STATE.trails[i] = { buf: new Float32Array(cap * 2), cap: cap, head: 0, count: 0 };
+          }
+        }
+      }
+
+      // Record one trail sample per body per frame into its ring buffer.
+      // head advances modulo cap; once full the oldest sample is overwritten.
+      // No array resizing, no object allocation -> stable memory.
+      function recordTrails() {
+        const bodies = STATE.bodies;
+        for (let i = 0; i < bodies.length; i++) {
+          const t = STATE.trails[i];
+          if (!t) continue;
+          const b = bodies[i];
+          const idx = (t.head * 2);
+          t.buf[idx] = b.x;
+          t.buf[idx + 1] = b.y;
+          t.head = (t.head + 1) % t.cap;
+          if (t.count < t.cap) t.count++;
+        }
+      }
+
+      function loop() {
+        if (!STATE.flags.paused) {
+          // Advance physics using the existing integrator. Substeps keep
+          // the effective timestep small for orbital stability.
+          const dt = STATE.params.dt;
+          const substeps = STATE.params.substeps;
+          for (let s = 0; s < substeps; s++) {
+            STATE.bodies = gravityStep(STATE.bodies, dt);
+          }
+          // Record trail positions (one sample per frame, not per substep)
+          // into fixed-capacity ring buffers — zero per-frame allocations.
+          ensureTrailCapacity(STATE.params.trailLength);
+          recordTrails();
+        }
+        updateReadouts();
+        render();
+        requestAnimationFrame(loop);
+      }
+
+      /* ------------------------------------------------------------
+         ENTRY POINT
+         ------------------------------------------------------------ */
+      // Update the play/pause button label to match current state.
+      function syncPlayLabel() {
+        const btn = document.getElementById('btn-play');
+        if (btn) btn.textContent = STATE.flags.paused ? 'Play' : 'Pause';
+      }
+
+      // Toggle animation pause state and refresh the button label.
+      function togglePlayPause() {
+        STATE.flags.paused = !STATE.flags.paused;
+        syncPlayLabel();
+      }
+
+      // Refresh the live body-count readout.
+      function updateReadouts() {
+        const el = document.getElementById('readout-count');
+        if (el) el.textContent = String(STATE.bodies.length);
+      }
+
+      // Wire up all controls: play/pause, reset, reset-view, and the
+      // gravity / dt / trail-length sliders with live value labels.
+      function setupControls() {
+        const btnPlay = document.getElementById('btn-play');
+        if (btnPlay) btnPlay.addEventListener('click', togglePlayPause);
+        syncPlayLabel();
+
+        const btn = document.getElementById('btn-reset');
+        if (btn) btn.addEventListener('click', resetToPreset);
+        const btnView = document.getElementById('btn-reset-view');
+        if (btnView) btnView.addEventListener('click', resetView);
+
+        // Gravity strength slider -> STATE.params.G (used by integrator).
+        const sGrav = document.getElementById('slider-gravity');
+        const vGrav = document.getElementById('val-gravity');
+        if (sGrav) {
+          sGrav.addEventListener('input', function () {
+            STATE.params.G = parseFloat(sGrav.value);
+            if (vGrav) vGrav.textContent = STATE.params.G.toFixed(2);
+          });
+        }
+
+        // Simulation speed (dt) slider -> STATE.params.dt.
+        const sDt = document.getElementById('slider-dt');
+        const vDt = document.getElementById('val-dt');
+        if (sDt) {
+          sDt.addEventListener('input', function () {
+            STATE.params.dt = parseFloat(sDt.value);
+            if (vDt) vDt.textContent = STATE.params.dt.toFixed(3);
+          });
+        }
+
+        // Trail length slider -> STATE.params.trailLength.
+        const sTrail = document.getElementById('slider-trail');
+        const vTrail = document.getElementById('val-trail');
+        if (sTrail) {
+          sTrail.addEventListener('input', function () {
+            STATE.params.trailLength = parseInt(sTrail.value, 10);
+            if (vTrail) vTrail.textContent = String(STATE.params.trailLength);
+          });
+        }
+
+        updateReadouts();
+      }
+
+      /* ------------------------------------------------------------
+         CAMERA INPUT — pan (middle mouse / Shift+drag) and zoom (wheel,
+         pinch). These are intentionally separate from the launch
+         interaction (plain left-drag) so navigation never hijacks it.
+         ------------------------------------------------------------ */
+      function setupCameraInput() {
+        const canvas = STATE.canvas;
+
+        // --- Mouse wheel: zoom in/out centred on the cursor ---
+        canvas.addEventListener('wheel', function (e) {
+          e.preventDefault();
+          // deltaY > 0 scrolls down -> zoom out. Use a smooth exponential factor.
+          const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+          zoomAtScreen(e.clientX, e.clientY, factor);
+        }, { passive: false });
+
+        // --- Mouse pan: middle button OR Shift + left button ---
+        canvas.addEventListener('mousedown', function (e) {
+          const wantPan = e.button === 1 || (e.button === 0 && e.shiftKey);
+          if (!wantPan) return;
+          e.preventDefault();
+          const inp = STATE.input;
+          inp.panning = true;
+          inp.panStartX = e.clientX;
+          inp.panStartY = e.clientY;
+          inp.camStartX = STATE.camera.x;
+          inp.camStartY = STATE.camera.y;
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          const inp = STATE.input;
+          // Track cursor for downstream launch preview regardless of pan.
+          inp.mouseX = e.clientX;
+          inp.mouseY = e.clientY;
+          if (!inp.panning) return;
+          // Translate the camera by the pixel delta (1:1 screen pan).
+          STATE.camera.x = inp.camStartX + (e.clientX - inp.panStartX);
+          STATE.camera.y = inp.camStartY + (e.clientY - inp.panStartY);
+        });
+
+        window.addEventListener('mouseup', function (e) {
+          if (e.button === 1 || e.button === 0) {
+            STATE.input.panning = false;
+          }
+        });
+
+        // --- Touch: single-finger is reserved for launch (downstream);
+        //     two-finger pinch zooms and pans. ---
+        canvas.addEventListener('touchstart', function (e) {
+          if (e.touches.length === 2) {
+            e.preventDefault();
+            const t0 = e.touches[0], t1 = e.touches[1];
+            const dx = t1.clientX - t0.clientX;
+            const dy = t1.clientY - t0.clientY;
+            const inp = STATE.input;
+            inp.pinching = true;
+            inp.pinchStartDist = Math.hypot(dx, dy);
+            inp.pinchStartZoom = STATE.camera.zoom;
+            inp.pinchCenterX = (t0.clientX + t1.clientX) / 2;
+            inp.pinchCenterY = (t0.clientY + t1.clientY) / 2;
+            inp.camStartX = STATE.camera.x;
+            inp.camStartY = STATE.camera.y;
+            inp.panStartX = inp.pinchCenterX;
+            inp.panStartY = inp.pinchCenterY;
+          }
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function (e) {
+          const inp = STATE.input;
+          if (!inp.pinching || e.touches.length !== 2) return;
+          e.preventDefault();
+          const t0 = e.touches[0], t1 = e.touches[1];
+          const dx = t1.clientX - t0.clientX;
+          const dy = t1.clientY - t0.clientY;
+          const dist = Math.hypot(dx, dy);
+          const midX = (t0.clientX + t1.clientX) / 2;
+          const midY = (t0.clientY + t1.clientY) / 2;
+          // Zoom around the original pinch centre using the distance ratio.
+          if (inp.pinchStartDist > 0) {
+            const ratio = dist / inp.pinchStartDist;
+            // Re-derive zoom from the start to keep it stable across events.
+            STATE.camera.zoom = Math.max(0.05, Math.min(50, inp.pinchStartZoom * ratio));
+          }
+          // Pan by the midpoint delta so two-finger drag moves the view.
+          STATE.camera.x = inp.camStartX + (midX - inp.panStartX);
+          STATE.camera.y = inp.camStartY + (midY - inp.panStartY);
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function (e) {
+          if (e.touches.length < 2) {
+            STATE.input.pinching = false;
+          }
+        });
+        canvas.addEventListener('touchcancel', function () {
+          STATE.input.pinching = false;
+        });
+      }
+
+      /* ------------------------------------------------------------
+         LAUNCH INPUT — click-and-drag to fling a new body.
+         Plain left-drag (mouse) or single-finger drag (touch) starts a
+         launch. The drag vector defines the initial velocity: the body is
+         spawned at the press position in world space and released with
+         velocity proportional to the drag (screen px -> world units).
+         ------------------------------------------------------------ */
+      function setupLaunchInput() {
+        const canvas = STATE.canvas;
+
+        // --- Mouse: left button without Shift starts a launch ---
+        canvas.addEventListener('mousedown', function (e) {
+          if (e.button !== 0 || e.shiftKey) return; // pan owns these
+          e.preventDefault();
+          startLaunch(e.clientX, e.clientY);
+        });
+
+        window.addEventListener('mousemove', function (e) {
+          const inp = STATE.input;
+          if (!inp.launching) return;
+          inp.launchCurX = e.clientX;
+          inp.launchCurY = e.clientY;
+        });
+
+        window.addEventListener('mouseup', function (e) {
+          if (e.button !== 0) return;
+          if (STATE.input.launching) finishLaunch();
+        });
+
+        // --- Touch: single finger starts a launch; two fingers are pinch ---
+        canvas.addEventListener('touchstart', function (e) {
+          if (e.touches.length !== 1) return;       // pinch handled elsewhere
+          if (STATE.input.pinching) return;
+          e.preventDefault();
+          const t = e.touches[0];
+          startLaunch(t.clientX, t.clientY);
+        }, { passive: false });
+
+        canvas.addEventListener('touchmove', function (e) {
+          const inp = STATE.input;
+          if (!inp.launching || e.touches.length !== 1) return;
+          e.preventDefault();
+          const t = e.touches[0];
+          inp.launchCurX = t.clientX;
+          inp.launchCurY = t.clientY;
+        }, { passive: false });
+
+        canvas.addEventListener('touchend', function (e) {
+          if (STATE.input.launching && e.touches.length === 0) {
+            finishLaunch();
+          }
+        });
+        canvas.addEventListener('touchcancel', function () {
+          if (STATE.input.launching) cancelLaunch();
+        });
+      }
+
+      // Begin a launch: record the world-space origin and current pointer.
+      function startLaunch(screenX, screenY) {
+        const w = screenToWorld(screenX, screenY);
+        const inp = STATE.input;
+        inp.launching = true;
+        inp.launchWorldX = w[0];
+        inp.launchWorldY = w[1];
+        inp.launchCurX = screenX;
+        inp.launchCurY = screenY;
+      }
+
+      // Finalise a launch: spawn a body whose velocity is proportional to
+      // the drag vector (pointer - origin), converted to world units.
+      function finishLaunch() {
+        const inp = STATE.input;
+        inp.launching = false;
+        const start = worldToScreen(inp.launchWorldX, inp.launchWorldY);
+        // Drag vector in screen pixels.
+        const dx = inp.launchCurX - start[0];
+        const dy = inp.launchCurY - start[1];
+        // Convert screen px to world velocity via the render scale + zoom,
+        // then apply the tunable velocity multiplier.
+        const s = CONFIG.PIXELS_PER_UNIT * STATE.camera.zoom;
+        const k = CONFIG.LAUNCH_VEL_SCALE / s;
+        if (STATE.bodies.length < CONFIG.MAX_BODIES) {
+          STATE.bodies.push({
+            x: inp.launchWorldX,
+            y: inp.launchWorldY,
+            vx: dx * k,
+            vy: dy * k,
+            mass: CONFIG.LAUNCH_MASS,
+            color: CONFIG.LAUNCH_COLOR,
+          });
+        }
+      }
+
+      // Abort an in-progress launch without spawning a body.
+      function cancelLaunch() {
+        STATE.input.launching = false;
+      }
+
+      /* ============================================================
+         KEYBOARD SHORTCUTS — Space toggles play/pause, R resets.
+         Ignored while focus is in a text input / slider so typing and
+         slider arrow-key nudging are never hijacked.
+         ============================================================ */
+      function setupKeyboard() {
+        window.addEventListener('keydown', function (e) {
+          // Don't interfere with form fields or range sliders.
+          const tag = (e.target && e.target.tagName) ? e.target.tagName.toLowerCase() : '';
+          if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) {
+            return;
+          }
+
+          if (e.code === 'Space' || e.key === ' ' || e.key === 'Spacebar') {
+            e.preventDefault();   // stop page scroll on Space
+            togglePlayPause();
+          } else if (e.key === 'r' || e.key === 'R') {
+            e.preventDefault();
+            resetToPreset();
+          }
+        });
+
+        // Auto-dismiss the usage hint after the first real interaction.
+        const hint = document.getElementById('hint');
+        function dismissHint() {
+          if (hint) hint.classList.add('hidden');
+        }
+        // Keep it visible briefly, then fade after 8s or on first key press.
+        window.setTimeout(dismissHint, 8000);
+        window.addEventListener('keydown', function () {
+          dismissHint();
+        }, { once: true });
+      }
+
+      function init() {
+        setupCanvas();
+        loadPreset();          // initialise bodies before the first frame
+        setupControls();
+        setupCameraInput();   // pan / zoom navigation (this task)
+        setupLaunchInput();   // click-and-drag launch (this task)
+        setupKeyboard();      // Space / R shortcuts + hint (this task)
+        requestAnimationFrame(loop);
+      }
+
+      // Start once DOM is ready (script is at end of body, so it is).
+      init();
+    </script>
   </body>
 </html>
